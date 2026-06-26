@@ -15,9 +15,9 @@ services:
       - NODE_ENV=production
       - PORT=3000
     ports:
-      - "${WEB_PORT:-8094}:3000"
+      - "${WEB_BIND_IP:-0.0.0.0}:${WEB_PORT:-8094}:3000"
     networks:
-      - db-shared
+      - lunch-internal
     depends_on:
       obedove-menu-db:
         condition: service_healthy
@@ -37,11 +37,15 @@ services:
       POSTGRES_USER: ${DB_USER}
       POSTGRES_PASSWORD: ${DB_PASSWORD}
       TZ: Europe/Bratislava
+    ports:
+      # n8n runs on another machine, so PostgreSQL must be reachable from LAN/Tailscale.
+      # Recommended: set DB_BIND_IP to the webserver Tailscale IP, not 0.0.0.0.
+      - "${DB_BIND_IP:-127.0.0.1}:${DB_PUBLIC_PORT:-5434}:5432"
     volumes:
       - obedove-menu-db-data:/var/lib/postgresql/data
       - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     networks:
-      - db-shared
+      - lunch-internal
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
       interval: 10s
@@ -53,5 +57,6 @@ volumes:
     name: obedove-menu-db-data
 
 networks:
-  db-shared:
-    external: true
+  lunch-internal:
+    name: lunch-internal
+    driver: bridge
