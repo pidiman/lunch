@@ -1,0 +1,57 @@
+services:
+  obedove-menu:
+    build: ./app
+    image: obedove-menu:latest
+    container_name: obedove-menu
+    restart: unless-stopped
+    environment:
+      - DB_HOST=obedove-menu-db
+      - DB_PORT=5432
+      - DB_NAME=${DB_NAME}
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - SITE_TITLE=${SITE_TITLE:-Obedové menu}
+      - TZ=Europe/Bratislava
+      - NODE_ENV=production
+      - PORT=3000
+    ports:
+      - "${WEB_PORT:-8094}:3000"
+    networks:
+      - db-shared
+    depends_on:
+      obedove-menu-db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://127.0.0.1:3000/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  obedove-menu-db:
+    image: postgres:16-alpine
+    container_name: obedove-menu-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      TZ: Europe/Bratislava
+    volumes:
+      - obedove-menu-db-data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    networks:
+      - db-shared
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  obedove-menu-db-data:
+    name: obedove-menu-db-data
+
+networks:
+  db-shared:
+    external: true
