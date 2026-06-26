@@ -1,0 +1,17 @@
+# Local environment
+.env
+.env.*
+!.env.example
+
+# Node
+node_modules/
+npm-debug.log*
+
+# Docker / runtime data
+postgres/data/
+*.log
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
