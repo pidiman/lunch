@@ -6,13 +6,19 @@ Jednoduchá mobile responsive landing page, ktorá číta dnešné obedové menu
 
 ```text
 n8n na inej machine
-        ↓ PostgreSQL TCP cez LAN/Tailscale
+        ↓ PostgreSQL TCP cez LAN/Tailscale, host port 5434
 RPI / webserver
         ├── obedove-menu      Node.js landing page
-        └── obedove-menu-db   PostgreSQL databáza
+        └── obedove-menu-db   PostgreSQL databáza, container port 5432
 ```
 
 Dôležité: n8n **nie je na rovnakom Docker hoste** ako webserver, preto v n8n credential nepoužívaj Docker hostname `obedove-menu-db`. Ten funguje iba medzi kontajnermi na tom istom serveri.
+
+Dôležité 2: host port `5432` je u teba už obsadený iným PostgreSQL kontajnerom. Tento projekt preto používa na hoste port `5434`, ktorý sa mapuje do kontajnera na interný PostgreSQL port `5432`.
+
+```text
+n8n / LAN / Tailscale → IP_WEBSERVERA:5434 → obedove-menu-db:5432
+```
 
 ## Služby
 
@@ -46,6 +52,22 @@ http://192.168.1.50:8094
 curl http://127.0.0.1:8094/health
 ```
 
+## PostgreSQL porty
+
+V kontajneri PostgreSQL stále beží na štandardnom porte:
+
+```text
+obedove-menu-db:5432
+```
+
+Na hoste/webserveri je ale vystavený ako:
+
+```text
+IP_WEBSERVERA:5434
+```
+
+Preto n8n, Adminer alebo iný externý klient musí používať port `5434`, nie `5432`.
+
 ## Nastavenie PostgreSQL pre n8n na inej machine
 
 V `.env` nastav `DB_BIND_IP` tak, aby bol PostgreSQL dostupný z n8n servera.
@@ -77,6 +99,13 @@ Po zmene `.env` reštartuj stack:
 
 ```bash
 docker compose up -d
+```
+
+Over mapovanie portu na webserveri:
+
+```bash
+docker compose ps
+ss -lntp | grep 5434
 ```
 
 ## n8n PostgreSQL credential
