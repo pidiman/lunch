@@ -40,12 +40,14 @@ services:
     ports:
       # n8n runs on another machine, so PostgreSQL must be reachable from LAN/Tailscale.
       # Recommended: set DB_BIND_IP to the webserver Tailscale IP, not 0.0.0.0.
+      # Host port 5432 is intentionally not used because another DB container already uses it.
       - "${DB_BIND_IP:-127.0.0.1}:${DB_PUBLIC_PORT:-5434}:5432"
     volumes:
       - obedove-menu-db-data:/var/lib/postgresql/data
       - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     networks:
       - lunch-internal
+      - db-shared
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
       interval: 10s
@@ -60,3 +62,7 @@ networks:
   lunch-internal:
     name: lunch-internal
     driver: bridge
+
+  db-shared:
+    external: true
+    name: db-shared
