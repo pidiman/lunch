@@ -1,0 +1,10 @@
+{
+  "name": "obedove-menu",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Jednoduchá landing page pre obedové menu z PostgreSQL",
+  "main": "server.js",
+  "dependencies": {
+    "pg": "^8.12.0"
+  }
+}
