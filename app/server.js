@@ -327,6 +327,10 @@ function renderPage(items, error = null) {
       font-size: 12px;
     }
 
+    .mobile-date-inline {
+      display: none;
+    }
+
     .stats {
       display: grid;
       grid-template-columns: repeat(3, 1fr);
@@ -559,19 +563,36 @@ function renderPage(items, error = null) {
         margin-bottom: 0;
       }
 
+      .app-pill,
+      .date-card {
+        display: none;
+      }
+
       .hero h1 {
         font-size: clamp(28px, 9vw, 40px);
       }
 
-      .hero-subtitle {
-        display: none;
+      .mobile-date-inline {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        flex-wrap: wrap;
+        margin-top: 8px;
       }
 
-      .date-card {
-        width: fit-content;
-        margin-top: 12px;
-        padding: 10px 12px;
-        text-align: left;
+      .mobile-date-inline strong {
+        display: inline;
+        font-size: 14px;
+      }
+
+      .mobile-date-inline span {
+        display: inline;
+        color: rgba(255,255,255,.72);
+        font-size: 12px;
+      }
+
+      .hero-subtitle {
+        display: none;
       }
 
       .stats,
@@ -626,6 +647,10 @@ function renderPage(items, error = null) {
           <div>
             <div class="app-pill">🍽️ ${escapeHtml(SITE_TITLE)}</div>
             <h1>Dnešné obedové menu</h1>
+            <div class="mobile-date-inline">
+              <strong>${escapeHtml(today)}</strong>
+              <span>Aktualizované ${escapeHtml(updatedAt)}</span>
+            </div>
             <p class="hero-subtitle">
               Prehľad obedov zo všetkých tvojich zdrojov na jednom mieste. Dáta importuje n8n a stránka číta priamo z PostgreSQL.
             </p>
