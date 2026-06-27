@@ -215,9 +215,7 @@ function renderPage(items, error = null) {
       color: var(--text);
     }
 
-    * {
-      box-sizing: border-box;
-    }
+    * { box-sizing: border-box; }
 
     html {
       min-height: 100%;
@@ -233,9 +231,7 @@ function renderPage(items, error = null) {
         var(--bg);
     }
 
-    a {
-      color: inherit;
-    }
+    a { color: inherit; }
 
     .page {
       width: min(1040px, 100%);
@@ -375,9 +371,7 @@ function renderPage(items, error = null) {
       backdrop-filter: blur(12px);
     }
 
-    .restaurant-card {
-      padding: 18px;
-    }
+    .restaurant-card { padding: 18px; }
 
     .restaurant-header {
       display: flex;
@@ -494,9 +488,7 @@ function renderPage(items, error = null) {
       font-size: 13px;
     }
 
-    .allergens span {
-      font-weight: 800;
-    }
+    .allergens span { font-weight: 800; }
 
     .price-badge {
       position: sticky;
@@ -529,9 +521,7 @@ function renderPage(items, error = null) {
     }
 
     .empty-state,
-    .error-state {
-      padding: 26px;
-    }
+    .error-state { padding: 26px; }
 
     .empty-state h2,
     .error-state h2 {
@@ -547,9 +537,7 @@ function renderPage(items, error = null) {
       line-height: 1.5;
     }
 
-    .error-state {
-      border-left: 6px solid var(--danger);
-    }
+    .error-state { border-left: 6px solid var(--danger); }
 
     .footer {
       padding: 22px 4px 10px;
@@ -559,46 +547,73 @@ function renderPage(items, error = null) {
     }
 
     @media (max-width: 720px) {
-      .page {
-        padding: 12px;
-      }
+      .page { padding: 10px; }
 
       .hero {
-        padding: 22px;
-        border-radius: 24px;
+        padding: 16px;
+        border-radius: 20px;
       }
 
       .hero-top {
         display: block;
+        margin-bottom: 0;
+      }
+
+      .hero h1 {
+        font-size: clamp(28px, 9vw, 40px);
+      }
+
+      .hero-subtitle {
+        display: none;
       }
 
       .date-card {
         width: fit-content;
-        margin-top: 18px;
+        margin-top: 12px;
+        padding: 10px 12px;
         text-align: left;
       }
 
-      .stats {
-        grid-template-columns: 1fr;
+      .stats,
+      .stat {
+        display: none;
+      }
+
+      .content {
+        margin-top: 12px;
+        gap: 12px;
       }
 
       .restaurant-card {
-        padding: 14px;
-        border-radius: 24px;
+        padding: 12px;
+        border-radius: 20px;
       }
 
       .restaurant-header {
         align-items: flex-start;
+        padding-bottom: 12px;
+      }
+
+      .menu-list {
+        gap: 10px;
+        padding-top: 12px;
       }
 
       .menu-item {
         grid-template-columns: 1fr;
-        gap: 12px;
+        gap: 10px;
+        padding: 12px;
+        border-radius: 16px;
       }
 
       .price-badge {
         position: static;
         justify-self: start;
+        padding: 8px 10px;
+      }
+
+      .footer {
+        padding-top: 14px;
       }
     }
   </style>
