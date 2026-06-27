@@ -132,14 +132,15 @@ function groupBySource(items) {
   }, {});
 }
 
-function renderMenuItem(item) {
+function renderMenuItem(item, index = 0) {
   const price = formatPrice(item.price_eur);
   const allergens = Array.isArray(item.allergens) ? item.allergens : [];
   const code = item.menu_code ? String(item.menu_code).trim() : '';
   const category = item.category || 'unknown';
+  const mobileExtraClass = index >= 3 ? ' mobile-extra' : '';
 
   return `
-    <article class="menu-item">
+    <article class="menu-item${mobileExtraClass}">
       <div class="menu-item-body">
         <div class="menu-item-topline">
           ${code ? `<span class="menu-code">${escapeHtml(code)}</span>` : ''}
@@ -183,19 +184,25 @@ function renderPage(items, error = null, lastUpdatedAt = null) {
 
   const groupsHtml = Object.entries(grouped).map(([sourceName, rows]) => {
     const sourceUrl = rows.find((row) => row.source_url)?.source_url;
+    const isMobileCollapsible = rows.length > 3;
 
     return `
-      <section class="restaurant-card">
+      <section class="restaurant-card${isMobileCollapsible ? ' mobile-collapsible' : ''}">
         <div class="restaurant-header">
           <div>
             <p class="eyebrow">Reštaurácia</p>
-            <h2>${escapeHtml(sourceName)}</h2>
+            <h2>
+              <button class="restaurant-toggle" type="button" aria-expanded="false" ${isMobileCollapsible ? '' : 'disabled'}>
+                <span>${escapeHtml(sourceName)}</span>
+                ${isMobileCollapsible ? `<small class="mobile-toggle-text">Zobraziť všetko</small>` : ''}
+              </button>
+            </h2>
           </div>
           <div class="restaurant-count">${rows.length}</div>
         </div>
 
         <div class="menu-list">
-          ${rows.map(renderMenuItem).join('')}
+          ${rows.map((row, index) => renderMenuItem(row, index)).join('')}
         </div>
 
         ${sourceUrl ? `
@@ -420,6 +427,27 @@ function renderPage(items, error = null, lastUpdatedAt = null) {
       letter-spacing: -.04em;
     }
 
+    .restaurant-toggle {
+      display: inline-flex;
+      align-items: baseline;
+      gap: 8px;
+      padding: 0;
+      border: 0;
+      background: transparent;
+      color: inherit;
+      font: inherit;
+      letter-spacing: inherit;
+      text-align: left;
+    }
+
+    .restaurant-toggle:disabled {
+      cursor: default;
+    }
+
+    .mobile-toggle-text {
+      display: none;
+    }
+
     .restaurant-count {
       display: grid;
       place-items: center;
@@ -634,6 +662,45 @@ function renderPage(items, error = null, lastUpdatedAt = null) {
         padding-bottom: 12px;
       }
 
+      .restaurant-toggle:not(:disabled) {
+        cursor: pointer;
+      }
+
+      .restaurant-toggle:not(:disabled)::after {
+        content: '⌄';
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 24px;
+        height: 24px;
+        border-radius: 999px;
+        background: #dcfce7;
+        color: #166534;
+        font-size: 18px;
+        line-height: 1;
+      }
+
+      .restaurant-card.mobile-collapsible.expanded .restaurant-toggle::after {
+        content: '⌃';
+      }
+
+      .mobile-toggle-text {
+        display: inline;
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 800;
+        letter-spacing: 0;
+        white-space: nowrap;
+      }
+
+      .restaurant-card.mobile-collapsible.expanded .mobile-toggle-text {
+        display: none;
+      }
+
+      .restaurant-card.mobile-collapsible:not(.expanded) .menu-item.mobile-extra {
+        display: none;
+      }
+
       .menu-list {
         gap: 10px;
         padding-top: 12px;
@@ -720,6 +787,17 @@ function renderPage(items, error = null, lastUpdatedAt = null) {
       Powered by n8n · PostgreSQL · Docker · Raspberry Pi homelab
     </footer>
   </main>
+  <script>
+    document.querySelectorAll('.restaurant-card.mobile-collapsible .restaurant-toggle').forEach((button) => {
+      button.addEventListener('click', () => {
+        if (!window.matchMedia('(max-width: 720px)').matches) return;
+
+        const card = button.closest('.restaurant-card');
+        const expanded = card.classList.toggle('expanded');
+        button.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+      });
+    });
+  </script>
 </body>
 </html>`;
 }
