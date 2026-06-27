@@ -11,6 +11,7 @@ services:
       - DB_USER=${DB_USER}
       - DB_PASSWORD=${DB_PASSWORD}
       - SITE_TITLE=${SITE_TITLE:-Obedové menu}
+      - ADMIN_TOKEN=${ADMIN_TOKEN}
       - TZ=Europe/Bratislava
       - NODE_ENV=production
       - PORT=3000
