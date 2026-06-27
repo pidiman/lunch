@@ -28,6 +28,19 @@ function formatPrice(value) {
   return `${number.toFixed(2).replace('.', ',')} €`;
 }
 
+function formatUpdatedAt(value) {
+  if (!value) return '—';
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '—';
+
+  return new Intl.DateTimeFormat('sk-SK', {
+    timeZone: 'Europe/Bratislava',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(date);
+}
+
 function categoryLabel(category) {
   const labels = {
     soup: 'Polievka',
@@ -63,7 +76,7 @@ async function queryTodayMenu() {
   await client.connect();
 
   try {
-    const result = await client.query(`
+    const menuResult = await client.query(`
       SELECT
         source_id,
         source_name,
@@ -94,7 +107,17 @@ async function queryTodayMenu() {
         title
     `);
 
-    return result.rows;
+    const metaResult = await client.query(`
+      SELECT MAX(created_at) AS last_updated_at
+      FROM public.lunch_menu_items
+      WHERE menu_date = CURRENT_DATE
+        AND is_available = TRUE
+    `);
+
+    return {
+      items: menuResult.rows,
+      lastUpdatedAt: metaResult.rows[0]?.last_updated_at || null,
+    };
   } finally {
     await client.end();
   }
@@ -142,7 +165,7 @@ function renderMenuItem(item) {
   `;
 }
 
-function renderPage(items, error = null) {
+function renderPage(items, error = null, lastUpdatedAt = null) {
   const now = new Date();
   const today = new Intl.DateTimeFormat('sk-SK', {
     timeZone: 'Europe/Bratislava',
@@ -152,11 +175,7 @@ function renderPage(items, error = null) {
     year: 'numeric',
   }).format(now);
 
-  const updatedAt = new Intl.DateTimeFormat('sk-SK', {
-    timeZone: 'Europe/Bratislava',
-    hour: '2-digit',
-    minute: '2-digit',
-  }).format(now);
+  const updatedAt = formatUpdatedAt(lastUpdatedAt);
 
   const grouped = groupBySource(items);
   const sourceCount = Object.keys(grouped).length;
@@ -713,13 +732,13 @@ const server = http.createServer(async (req, res) => {
   }
 
   try {
-    const items = await queryTodayMenu();
+    const { items, lastUpdatedAt } = await queryTodayMenu();
 
     res.writeHead(200, {
       'content-type': 'text/html; charset=utf-8',
       'cache-control': 'no-store',
     });
-    res.end(renderPage(items));
+    res.end(renderPage(items, null, lastUpdatedAt));
   } catch (err) {
     res.writeHead(500, {
       'content-type': 'text/html; charset=utf-8',
