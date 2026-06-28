@@ -25,12 +25,16 @@ CREATE TABLE IF NOT EXISTS lunch_sources (
   source_url TEXT NOT NULL,
   restaurant_name TEXT,
   city TEXT DEFAULT 'Bratislava',
+  source_location TEXT NOT NULL DEFAULT 'Praca',
   enabled BOOLEAN NOT NULL DEFAULT TRUE,
   parser_name TEXT,
   parser_version TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE lunch_sources
+ADD COLUMN IF NOT EXISTS source_location TEXT NOT NULL DEFAULT 'Praca';
 
 -- 2) Import run log
 -- One row per n8n run. Useful for debugging and alerting.
@@ -55,47 +59,26 @@ CREATE TABLE IF NOT EXISTS lunch_import_runs (
 -- This is the main table used by n8n and the landing page.
 CREATE TABLE IF NOT EXISTS lunch_menu_items (
   id BIGSERIAL PRIMARY KEY,
-
-  -- Stable unique key generated in n8n, for example:
-  -- belavery-2026-06-26-02-furmanske-halusky
   item_uid TEXT NOT NULL UNIQUE,
-
-  -- Source metadata duplicated intentionally for simple web reads and historical snapshots.
   source_id TEXT NOT NULL REFERENCES lunch_sources(source_id) ON UPDATE CASCADE,
   source_name TEXT NOT NULL,
   source_type TEXT NOT NULL,
   source_url TEXT NOT NULL,
-
-  -- Menu date in Europe/Bratislava.
   menu_date DATE NOT NULL,
-
-  -- Optional restaurant menu code: 01, 02, S, soup, etc.
   menu_code TEXT,
-
-  -- Recommended values: soup, main, pizza, special, side, dessert, drink, unknown.
   category TEXT NOT NULL DEFAULT 'main',
-
   title TEXT NOT NULL,
   description TEXT,
   price_eur NUMERIC(10,2) CHECK (price_eur IS NULL OR price_eur >= 0),
   currency TEXT NOT NULL DEFAULT 'EUR',
-
-  -- Allergens are stored as JSON array, for example ["1", "3", "7"].
   allergens JSONB NOT NULL DEFAULT '[]'::jsonb,
-
-  -- Raw extracted text for troubleshooting parser issues.
   raw_text TEXT,
-
-  -- n8n/import metadata.
   parsed_at TIMESTAMPTZ,
   run_id TEXT REFERENCES lunch_import_runs(run_id) ON UPDATE CASCADE,
   parser_name TEXT,
   parser_version TEXT,
-
-  -- Soft flags for later features.
   is_available BOOLEAN NOT NULL DEFAULT TRUE,
   is_duplicate BOOLEAN NOT NULL DEFAULT FALSE,
-
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -120,6 +103,7 @@ INSERT INTO lunch_sources (
   source_url,
   restaurant_name,
   city,
+  source_location,
   parser_name,
   parser_version
 )
@@ -131,6 +115,7 @@ VALUES
     'https://belavery.sk/produktova-kategoria/denne-menu/',
     'BelaVery',
     'Bratislava',
+    'Stupava',
     'belavery',
     'v4-price-space-fix'
   ),
@@ -141,6 +126,7 @@ VALUES
     'http://www.ameliarestaurant.sk/dennemenu/index',
     'Ostravárna Amélia',
     'Bratislava',
+    'Karlovka',
     'amelia',
     'v1-day-block-price-parser'
   ),
@@ -151,6 +137,7 @@ VALUES
     'https://cdn.website.dish.co/media/72/8d/10031135/Tyzdenne-menu.pdf',
     'ZARK',
     'Bratislava',
+    'Praca',
     'zark_pdf',
     'v1-weekday-block-parser'
   )
@@ -160,11 +147,15 @@ ON CONFLICT (source_id) DO UPDATE SET
   source_url = EXCLUDED.source_url,
   restaurant_name = EXCLUDED.restaurant_name,
   city = EXCLUDED.city,
+  source_location = COALESCE(lunch_sources.source_location, EXCLUDED.source_location),
   parser_name = EXCLUDED.parser_name,
   parser_version = EXCLUDED.parser_version,
   updated_at = NOW();
 
 -- 6) Indexes for n8n upsert and fast landing page reads
+CREATE INDEX IF NOT EXISTS idx_lunch_sources_location
+ON lunch_sources(source_location, source_name);
+
 CREATE INDEX IF NOT EXISTS idx_lunch_menu_items_date
 ON lunch_menu_items(menu_date);
 
@@ -214,32 +205,35 @@ BEFORE UPDATE ON lunch_menu_items
 FOR EACH ROW
 EXECUTE FUNCTION set_updated_at();
 
--- 8) View used by the simple landing page
+-- 8) View used by the landing page
 CREATE OR REPLACE VIEW v_lunch_menu_today AS
 SELECT
-  id,
-  item_uid,
-  source_id,
-  source_name,
-  source_type,
-  source_url,
-  menu_date,
-  menu_code,
-  category,
-  title,
-  description,
-  price_eur,
-  currency,
-  allergens,
-  parsed_at,
-  parser_name,
-  parser_version
-FROM lunch_menu_items
-WHERE menu_date = CURRENT_DATE
-  AND is_available = TRUE
+  i.id,
+  i.item_uid,
+  i.source_id,
+  i.source_name,
+  i.source_type,
+  i.source_url,
+  COALESCE(s.source_location, 'Praca') AS source_location,
+  i.menu_date,
+  i.menu_code,
+  i.category,
+  i.title,
+  i.description,
+  i.price_eur,
+  i.currency,
+  i.allergens,
+  i.parsed_at,
+  i.parser_name,
+  i.parser_version
+FROM lunch_menu_items i
+LEFT JOIN lunch_sources s ON s.source_id = i.source_id
+WHERE i.menu_date = CURRENT_DATE
+  AND i.is_available = TRUE
 ORDER BY
-  source_name,
-  CASE category
+  COALESCE(s.source_location, 'Praca'),
+  i.source_name,
+  CASE i.category
     WHEN 'soup' THEN 1
     WHEN 'main' THEN 2
     WHEN 'special' THEN 3
@@ -249,10 +243,10 @@ ORDER BY
     WHEN 'drink' THEN 7
     ELSE 99
   END,
-  menu_code NULLS LAST,
-  title;
+  i.menu_code NULLS LAST,
+  i.title;
 
--- 9) View for last successful import status
+-- 9) View for last import status
 CREATE OR REPLACE VIEW v_lunch_import_status AS
 SELECT
   r.run_id,
