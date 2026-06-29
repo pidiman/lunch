@@ -14,6 +14,10 @@
     });
   }
 
+  function htmlEscape(value) {
+    return String(value || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
   function buildRestaurantMeta(restaurantCard) {
     var rows = Array.prototype.slice.call(restaurantCard.querySelectorAll('form.restaurant-row'));
     return rows.map(function (form) {
@@ -107,7 +111,7 @@
     var restaurantSelect = document.createElement('select');
     restaurantSelect.name = 'client_restaurant_filter';
     restaurantSelect.innerHTML = '<option value="">Všetky reštaurácie</option>' + meta.map(function (m) {
-      return '<option value="' + m.name.replace(/&/g, '&amp;').replace(/"/g, '&quot;') + '">' + m.name + '</option>';
+      return '<option value="' + htmlEscape(m.name) + '">' + htmlEscape(m.name) + '</option>';
     }).join('');
     restaurantLabel.appendChild(restaurantSelect);
 
@@ -117,7 +121,7 @@
     var locationSelect = document.createElement('select');
     locationSelect.name = 'client_location_filter';
     locationSelect.innerHTML = '<option value="">Všetky lokality</option>' + locations.map(function (l) {
-      return '<option value="' + l.replace(/&/g, '&amp;').replace(/"/g, '&quot;') + '">' + l + '</option>';
+      return '<option value="' + htmlEscape(l) + '">' + htmlEscape(l) + '</option>';
     }).join('');
     locationLabel.appendChild(locationSelect);
 
@@ -155,6 +159,62 @@
     });
   }
 
+  function uniqueLocations(meta) {
+    return Array.from(new Set(meta.map(function (m) { return m.location || 'Praca'; })));
+  }
+
+  function buildLocationOrderPanel(meta) {
+    var card = document.createElement('section');
+    card.className = 'card location-order-card';
+    card.innerHTML = '<h2>Poradie lokalít</h2><p class="location-order-note">Nižšie číslo sa zobrazí skôr. Hodnota 1 je prvá lokalita, vyššie čísla sa zobrazia neskôr.</p><div class="location-order-table"><div class="location-order-header"><div>Lokalita</div><div>Váha</div><div>Uložiť</div></div></div><div class="location-order-status" aria-live="polite"></div>';
+    var table = card.querySelector('.location-order-table');
+    var status = card.querySelector('.location-order-status');
+
+    function setStatus(message, ok) {
+      status.textContent = message || '';
+      status.className = 'location-order-status ' + (ok ? 'ok' : 'error');
+    }
+
+    function renderRows(orderMap) {
+      Array.prototype.slice.call(table.querySelectorAll('.location-order-row')).forEach(function (row) { row.remove(); });
+      var locations = uniqueLocations(meta).sort(function (a, b) {
+        return Number(orderMap[a] || 100) - Number(orderMap[b] || 100) || a.localeCompare(b, 'sk');
+      });
+      locations.forEach(function (location, index) {
+        var weight = Number(orderMap[location] || (index + 1) * 10);
+        var row = document.createElement('form');
+        row.className = 'location-order-row';
+        row.method = 'post';
+        row.action = '/admin/location-order/update';
+        row.innerHTML = '<div class="location-order-name"><strong>' + htmlEscape(location) + '</strong><span class="location-order-help">Poradie pre celú lokalitu</span></div><div class="location-order-weight"><input type="number" name="display_order" min="1" step="1" value="' + weight + '"></div><div><input type="hidden" name="source_location" value="' + htmlEscape(location) + '"><button class="location-order-save" type="submit" title="Uložiť poradie">💾</button></div>';
+        row.addEventListener('submit', function (event) {
+          event.preventDefault();
+          var body = new URLSearchParams(new FormData(row));
+          fetch('/admin/location-order/update', {
+            method: 'POST',
+            headers: { 'content-type': 'application/x-www-form-urlencoded' },
+            body: body.toString(),
+          }).then(function (res) {
+            if (!res.ok) throw new Error('HTTP ' + res.status);
+            return res.json();
+          }).then(function () {
+            setStatus('Poradie lokality ' + location + ' bolo uložené.', true);
+          }).catch(function (err) {
+            setStatus('Uloženie zlyhalo: ' + err.message, false);
+          });
+        });
+        table.appendChild(row);
+      });
+    }
+
+    fetch('/location-order.json', { cache: 'no-store' })
+      .then(function (res) { return res.ok ? res.json() : { order: {} }; })
+      .then(function (data) { renderRows(data.order || {}); })
+      .catch(function () { renderRows({}); });
+
+    return card;
+  }
+
   function buildTabs() {
     var main = document.querySelector('main.admin-page');
     if (!main || main.classList.contains('admin-tabs-ready')) return;
@@ -178,7 +238,7 @@
 
     var tabs = document.createElement('div');
     tabs.className = 'admin-tabs';
-    tabs.innerHTML = '<button type="button" class="admin-tab-button is-active" data-tab="items">Položky</button><button type="button" class="admin-tab-button" data-tab="locations">Lokality</button>';
+    tabs.innerHTML = '<button type="button" class="admin-tab-button is-active" data-tab="items">Položky</button><button type="button" class="admin-tab-button" data-tab="locations">Lokality</button><button type="button" class="admin-tab-button" data-tab="location-order">Poradie lokalít</button>';
 
     var itemsPanel = document.createElement('section');
     itemsPanel.className = 'admin-tab-panel is-active';
@@ -186,8 +246,12 @@
     var locationsPanel = document.createElement('section');
     locationsPanel.className = 'admin-tab-panel';
     locationsPanel.dataset.panel = 'locations';
+    var locationOrderPanel = document.createElement('section');
+    locationOrderPanel.className = 'admin-tab-panel';
+    locationOrderPanel.dataset.panel = 'location-order';
 
     top.insertAdjacentElement('afterend', tabs);
+    tabs.insertAdjacentElement('afterend', locationOrderPanel);
     tabs.insertAdjacentElement('afterend', locationsPanel);
     tabs.insertAdjacentElement('afterend', itemsPanel);
 
@@ -195,6 +259,7 @@
     itemsPanel.appendChild(addItemCard);
     itemsPanel.appendChild(itemSection);
     locationsPanel.appendChild(restaurantCard);
+    locationOrderPanel.appendChild(buildLocationOrderPanel(meta));
 
     function show(tab) {
       Array.prototype.slice.call(tabs.querySelectorAll('.admin-tab-button')).forEach(function (button) {
@@ -202,7 +267,9 @@
       });
       itemsPanel.classList.toggle('is-active', tab === 'items');
       locationsPanel.classList.toggle('is-active', tab === 'locations');
-      history.replaceState(null, '', tab === 'locations' ? '#lokality' : '#polozky');
+      locationOrderPanel.classList.toggle('is-active', tab === 'location-order');
+      var hash = tab === 'locations' ? '#lokality' : (tab === 'location-order' ? '#poradie-lokalit' : '#polozky');
+      history.replaceState(null, '', hash);
     }
 
     tabs.addEventListener('click', function (event) {
@@ -211,6 +278,7 @@
     });
 
     if (window.location.hash === '#lokality') show('locations');
+    if (window.location.hash === '#poradie-lokalit') show('location-order');
     main.classList.add('admin-tabs-ready');
   }
 
