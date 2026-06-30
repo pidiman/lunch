@@ -569,7 +569,7 @@ function renderPublicPage(items, error = null, lastUpdatedAt = null) {
               <p class="m-0 mb-1 text-xs font-black text-green-700 uppercase tracking-widest">Reštaurácia</p>
               <h2 class="m-0 text-2xl sm:text-3xl font-black tracking-tight">
                 <button class="restaurant-toggle inline-flex items-baseline gap-2 p-0 border-0 bg-transparent text-inherit font-[inherit] tracking-[inherit] text-left" type="button" aria-expanded="false" ${collapsible ? '' : 'disabled'}>
-                  <span>${escapeHtml(sourceName)}</span>${collapsible ? '<small class="mobile-toggle-text hidden text-xs font-bold text-gray-400 tracking-normal whitespace-nowrap">Zobraziť všetko</small>' : ''}
+                  <span>${escapeHtml(sourceName)}</span>${collapsible ? '<small class="mobile-toggle-text text-xs font-bold text-gray-400 tracking-normal whitespace-nowrap" style="display:none">Zobraziť všetko</small>' : ''}
                 </button>
               </h2>
             </div>
@@ -595,14 +595,12 @@ function renderPublicPage(items, error = null, lastUpdatedAt = null) {
     body { background: radial-gradient(circle at top left, rgba(34,197,94,.15), transparent 32rem), #f3f4f6; }
     .hero { background: linear-gradient(135deg, rgba(17,24,39,.98), rgba(22,101,52,.92)), #111827; }
     h1 { font-size: clamp(34px, 8vw, 64px); }
-    .restaurant-header h2 { font-size: clamp(22px, 5vw, 32px); }
-    @media (max-width: 640px) {
-      .mobile-collapsible:not(.expanded) .mobile-extra { display: none; }
-      .mobile-collapsible .restaurant-toggle:not(:disabled)::after { content: '⌄'; display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; border-radius: 999px; background: #dcfce7; color: #166534; font-size: 18px; }
-      .mobile-collapsible.expanded .restaurant-toggle::after { content: '⌃'; }
-      .mobile-collapsible .mobile-toggle-text { display: inline !important; }
-      .mobile-collapsible.expanded .mobile-toggle-text { display: none !important; }
-    }
+    .mobile-collapsible:not(.expanded) .mobile-extra { display: none; }
+    .mobile-collapsible .restaurant-toggle:not(:disabled) { cursor: pointer; }
+    .mobile-collapsible .restaurant-toggle:not(:disabled)::after { content: '⌄'; display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; border-radius: 999px; background: #dcfce7; color: #166534; font-size: 18px; }
+    .mobile-collapsible.expanded .restaurant-toggle::after { content: '⌃'; }
+    .mobile-collapsible .mobile-toggle-text { display: inline !important; }
+    .mobile-collapsible.expanded .mobile-toggle-text { display: none !important; }
   </style>
 </head>
 <body class="min-h-screen text-gray-900 antialiased">
@@ -650,7 +648,6 @@ function renderPublicPage(items, error = null, lastUpdatedAt = null) {
   <script>
     document.querySelectorAll('.restaurant-card.mobile-collapsible .restaurant-toggle').forEach((button) => {
       button.addEventListener('click', () => {
-        if (!window.matchMedia('(max-width: 640px)').matches) return;
         const card = button.closest('.restaurant-card');
         const expanded = card.classList.toggle('expanded');
         button.setAttribute('aria-expanded', expanded ? 'true' : 'false');
