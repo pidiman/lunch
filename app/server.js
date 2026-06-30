@@ -111,6 +111,19 @@ async function ensureSchema(client) {
   await client.query(`UPDATE public.lunch_sources SET source_location = 'Stupava' WHERE source_id = 'belavery' AND (source_location IS NULL OR source_location = 'Praca')`);
   await client.query(`UPDATE public.lunch_sources SET source_location = 'Karlovka' WHERE source_id = 'amelia' AND (source_location IS NULL OR source_location = 'Praca')`);
   await client.query(`UPDATE public.lunch_sources SET source_location = 'Praca' WHERE source_id = 'zark' AND (source_location IS NULL OR source_location = '')`);
+  await client.query(`
+    CREATE TABLE IF NOT EXISTS public.lunch_locations (
+      name TEXT PRIMARY KEY,
+      weight INTEGER NOT NULL DEFAULT 100,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+  await client.query(`
+    INSERT INTO public.lunch_locations (name, weight) VALUES
+      ('Praca', 10), ('Karlovka', 20), ('Stupava', 30)
+    ON CONFLICT (name) DO NOTHING
+  `);
 }
 
 function parseCookies(req) {
@@ -191,7 +204,9 @@ async function queryTodayMenu() {
         m.parsed_at
       FROM public.v_lunch_menu_today m
       LEFT JOIN public.lunch_sources s ON s.source_id = m.source_id
+      LEFT JOIN public.lunch_locations loc ON loc.name = COALESCE(s.source_location, 'Praca')
       ORDER BY
+        COALESCE(loc.weight, 999),
         COALESCE(s.source_location, 'Praca'),
         m.source_name,
         CASE m.category
@@ -275,7 +290,11 @@ async function queryAdminData(menuDate) {
       ORDER BY source_location, source_name
     `);
 
-    return { items: items.rows, sources: sources.rows };
+    const locations = await client.query(`
+      SELECT name, weight FROM public.lunch_locations ORDER BY weight, name
+    `);
+
+    return { items: items.rows, sources: sources.rows, locations: locations.rows };
   } finally {
     await client.end();
   }
@@ -434,6 +453,49 @@ async function updateRestaurant(form) {
       SET source_location = $2, updated_at = NOW()
       WHERE source_id = $1
     `, [clean(form.source_id), clean(form.source_location, 'Praca')]);
+  } finally {
+    await client.end();
+  }
+}
+
+async function createLocation(form) {
+  const name = clean(form.name);
+  if (!name) throw new Error('Názov lokality je povinný.');
+  const weight = toNumber(form.weight) ?? 100;
+  const client = newClient();
+  await client.connect();
+  try {
+    await ensureSchema(client);
+    await client.query(`
+      INSERT INTO public.lunch_locations (name, weight) VALUES ($1, $2)
+    `, [name, weight]);
+  } finally {
+    await client.end();
+  }
+}
+
+async function updateLocation(form) {
+  const name = clean(form.name);
+  if (!name) throw new Error('Názov lokality je povinný.');
+  const weight = toNumber(form.weight) ?? 100;
+  const client = newClient();
+  await client.connect();
+  try {
+    await client.query(`
+      UPDATE public.lunch_locations SET weight = $2, updated_at = NOW() WHERE name = $1
+    `, [name, weight]);
+  } finally {
+    await client.end();
+  }
+}
+
+async function deleteLocation(form) {
+  const name = clean(form.name);
+  if (!name) throw new Error('Názov lokality je povinný.');
+  const client = newClient();
+  await client.connect();
+  try {
+    await client.query(`DELETE FROM public.lunch_locations WHERE name = $1`, [name]);
   } finally {
     await client.end();
   }
@@ -603,7 +665,7 @@ function renderLogin(message = '') {
 </html>`;
 }
 
-function renderAdminPage({ items, sources, menuDate, notice = '', error = '' }) {
+function renderAdminPage({ items, sources, locations, menuDate, notice = '', error = '', activeTab = 'polozky' }) {
   const sourceOptions = (selected = '') => sources.map((source) => `
     <option value="${escapeHtml(source.source_id)}" ${source.source_id === selected ? 'selected' : ''}>${escapeHtml(source.source_name)} (${escapeHtml(source.source_id)})</option>
   `).join('');
@@ -613,19 +675,36 @@ function renderAdminPage({ items, sources, menuDate, notice = '', error = '' }) 
   `).join('');
 
   const locationOptions = (selected = 'Praca') => {
-    const options = LOCATION_OPTIONS.map((location) => `
-      <option value="${escapeHtml(location)}" ${location === selected ? 'selected' : ''}>${escapeHtml(location)}</option>
-    `).join('');
-    return options + (!LOCATION_OPTIONS.includes(selected) ? `<option value="${escapeHtml(selected)}" selected>${escapeHtml(selected)}</option>` : '');
+    const names = locations.length ? locations.map((l) => l.name) : LOCATION_OPTIONS;
+    const opts = names.map((name) => `<option value="${escapeHtml(name)}" ${name === selected ? 'selected' : ''}>${escapeHtml(name)}</option>`).join('');
+    return opts + (!names.includes(selected) ? `<option value="${escapeHtml(selected)}" selected>${escapeHtml(selected)}</option>` : '');
   };
 
   const restaurantRows = sources.map((source) => `
     <form class="restaurant-row" method="post" action="/admin/restaurants/update">
+      <input type="hidden" name="_tab" value="restauracie">
       <input type="hidden" name="source_id" value="${escapeHtml(source.source_id)}">
       <div><strong>${escapeHtml(source.source_name)}</strong><small>${escapeHtml(source.source_id)} · ${escapeHtml(source.source_type)}</small></div>
       <select name="source_location">${locationOptions(source.source_location || 'Praca')}</select>
-      <button type="submit">Uložiť lokalitu</button>
+      <button type="submit">Uložiť</button>
     </form>
+  `).join('');
+
+  const locationRows = locations.map((loc) => `
+    <div class="location-row">
+      <div class="location-info"><strong>${escapeHtml(loc.name)}</strong><small>Váha: ${escapeHtml(String(loc.weight))}</small></div>
+      <form class="location-edit" method="post" action="/admin/locations/update">
+        <input type="hidden" name="_tab" value="lokality">
+        <input type="hidden" name="name" value="${escapeHtml(loc.name)}">
+        <label>Váha<input type="number" name="weight" value="${escapeHtml(String(loc.weight))}" min="0" max="9999" style="width:90px"></label>
+        <button type="submit">Uložiť</button>
+      </form>
+      <form method="post" action="/admin/locations/delete" onsubmit="return confirm('Naozaj zmazať lokalitu ${escapeHtml(loc.name)}?')">
+        <input type="hidden" name="_tab" value="lokality">
+        <input type="hidden" name="name" value="${escapeHtml(loc.name)}">
+        <button class="danger-sm" type="submit">Zmazať</button>
+      </form>
+    </div>
   `).join('');
 
   const itemRows = items.map((item) => {
@@ -635,6 +714,7 @@ function renderAdminPage({ items, sources, menuDate, notice = '', error = '' }) 
       <details class="admin-item">
         <summary><span><strong>${escapeHtml(item.menu_code || '—')} · ${escapeHtml(item.title)}</strong><small>${escapeHtml(item.source_name || '')}</small></span><b>${escapeHtml(euro(item.price_eur))}</b></summary>
         <form class="grid" method="post" action="/admin/items/update">
+          <input type="hidden" name="_tab" value="polozky">
           <input type="hidden" name="id" value="${escapeHtml(item.id)}">
           <label>Dátum<input type="date" name="menu_date" value="${escapeHtml(dateValue)}"></label>
           <label>Reštaurácia<select name="source_id">${sourceOptions(item.source_id)}</select></label>
@@ -650,6 +730,7 @@ function renderAdminPage({ items, sources, menuDate, notice = '', error = '' }) 
           <div class="actions"><button type="submit">Uložiť</button></div>
         </form>
         <form method="post" action="/admin/items/delete" onsubmit="return confirm('Naozaj zmazať položku?')">
+          <input type="hidden" name="_tab" value="polozky">
           <input type="hidden" name="id" value="${escapeHtml(item.id)}">
           <button class="danger" type="submit">Zmazať</button>
         </form>
@@ -671,12 +752,19 @@ function renderAdminPage({ items, sources, menuDate, notice = '', error = '' }) 
     .top{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:14px}
     h1{margin:0;font-size:clamp(30px,7vw,54px);letter-spacing:-.06em;line-height:.95}
     .nav{display:flex;align-items:flex-start;gap:8px;flex-wrap:wrap;justify-content:flex-end}
-    .nav a{display:inline-flex;align-items:center;justify-content:center;width:auto;height:auto;min-width:0;min-height:0;padding:11px 14px;border-radius:999px;background:#111827;color:#fff;font-size:14px;font-weight:900;line-height:1.2;text-decoration:none;white-space:nowrap}
+    .nav a{display:inline-flex;align-items:center;justify-content:center;padding:11px 14px;border-radius:999px;background:#111827;color:#fff;font-size:14px;font-weight:900;line-height:1.2;text-decoration:none;white-space:nowrap}
     .card,.admin-item{background:var(--card);border:1px solid var(--border);border-radius:22px;box-shadow:var(--shadow)}
     .card{padding:16px;margin-bottom:14px}
-    .toolbar,.restaurant-row{display:flex;align-items:flex-end;gap:10px;flex-wrap:wrap}
-    .restaurant-row{align-items:center;justify-content:space-between;padding:12px;border:1px solid var(--border);border-radius:16px;margin-top:10px;background:#fff}
+    .tabs{display:flex;gap:6px;margin-bottom:16px;flex-wrap:wrap}
+    .tab-btn{padding:10px 20px;border:1px solid var(--border);border-radius:999px;background:var(--card);color:var(--muted);font-weight:800;font-size:14px;cursor:pointer;transition:all .15s}
+    .tab-btn.active{background:#111827;color:#fff;border-color:#111827}
+    .tab-panel{display:none}.tab-panel.active{display:block}
+    .toolbar{display:flex;align-items:flex-end;gap:10px;flex-wrap:wrap}
+    .restaurant-row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:12px;border:1px solid var(--border);border-radius:16px;margin-top:10px;background:#fff;flex-wrap:wrap}
     .restaurant-row small{display:block;color:var(--muted);margin-top:3px}
+    .location-row{display:flex;align-items:center;gap:12px;padding:12px;border:1px solid var(--border);border-radius:16px;margin-top:10px;background:#fff;flex-wrap:wrap}
+    .location-info{flex:1 1 auto}.location-info small{display:block;color:var(--muted);margin-top:3px}
+    .location-edit{display:flex;align-items:flex-end;gap:8px}
     label{display:grid;gap:6px;font-size:12px;font-weight:900;color:#374151;text-transform:uppercase;letter-spacing:.06em}
     input,select,textarea{width:100%;border:1px solid var(--border);border-radius:12px;padding:11px 12px;font:inherit;background:#fff;color:var(--text)}
     textarea{resize:vertical}
@@ -684,29 +772,81 @@ function renderAdminPage({ items, sources, menuDate, notice = '', error = '' }) 
     .wide{grid-column:span 2}
     .checkbox{display:flex;align-items:center;gap:8px;text-transform:none;letter-spacing:0;font-size:14px}.checkbox input{width:auto}
     .actions{display:flex;align-items:end}
-    button{display:inline-flex;align-items:center;justify-content:center;width:auto;height:auto;min-width:0;min-height:0;border:0;border-radius:999px;padding:11px 14px;background:var(--green);color:#fff;font-weight:900;line-height:1.2;cursor:pointer;white-space:nowrap}
+    button{display:inline-flex;align-items:center;justify-content:center;border:0;border-radius:999px;padding:11px 14px;background:var(--green);color:#fff;font-weight:900;font-size:14px;line-height:1.2;cursor:pointer;white-space:nowrap}
     .danger{background:var(--danger);margin:0 0 14px 14px}
+    .danger-sm{background:var(--danger);padding:8px 12px;font-size:13px}
     .notice{padding:12px 14px;border-radius:14px;background:#dcfce7;color:#166534;font-weight:800;margin-bottom:12px}
     .error{padding:12px 14px;border-radius:14px;background:#fee2e2;color:#991b1b;font-weight:800;margin-bottom:12px}
     .admin-item{margin-bottom:10px;overflow:hidden}
     summary{display:flex;justify-content:space-between;gap:12px;align-items:center;padding:14px 16px;cursor:pointer}
     summary small{display:block;color:var(--muted);font-weight:700;margin-top:3px}.admin-item form{padding:0 14px 14px}.muted{color:var(--muted)}
-    @media(max-width:720px){.admin-page{padding:10px}.top{display:block}.nav{justify-content:flex-start;margin-top:12px}.grid{grid-template-columns:1fr}.wide{grid-column:auto}.restaurant-row{display:grid;grid-template-columns:1fr}.toolbar{display:grid}.toolbar>*{width:100%}summary{align-items:flex-start}}
+    .add-location-form{display:flex;align-items:flex-end;gap:10px;flex-wrap:wrap;margin-top:14px;padding-top:14px;border-top:1px solid var(--border)}
+    @media(max-width:720px){.admin-page{padding:10px}.top{display:block}.nav{justify-content:flex-start;margin-top:12px}.grid{grid-template-columns:1fr}.wide{grid-column:auto}.restaurant-row,.location-row{flex-direction:column;align-items:stretch}.toolbar{flex-direction:column}.location-edit{flex-wrap:wrap}summary{align-items:flex-start}}
   </style>
 </head>
 <body>
   <main class="admin-page">
     <div class="top">
-      <div><h1>Admin menu</h1><p class="muted">CRUD nad položkami a lokalitami reštaurácií.</p></div>
+      <div><h1>Admin menu</h1><p class="muted">Správa položiek, reštaurácií a lokalít.</p></div>
       <div class="nav"><a href="/">Web</a><a href="/admin/logout">Odhlásiť</a></div>
     </div>
     ${notice ? `<div class="notice">${escapeHtml(notice)}</div>` : ''}
     ${error ? `<div class="error">${escapeHtml(error)}</div>` : ''}
     <section class="card"><form class="toolbar" method="get" action="/admin"><label>Dátum<input type="date" name="date" value="${escapeHtml(menuDate)}"></label><button type="submit">Filtrovať</button></form></section>
-    <section class="card"><h2>Reštaurácie a lokality</h2><p class="muted">Lokalita určuje skupinu, pod ktorou sa reštaurácia zobrazí na hlavnej stránke.</p>${restaurantRows}</section>
-    <section class="card"><h2>Pridať položku</h2><form class="grid" method="post" action="/admin/items/create"><label>Dátum<input type="date" name="menu_date" value="${escapeHtml(menuDate)}"></label><label>Reštaurácia<select name="source_id">${sourceOptions()}</select></label><label>Kód<input name="menu_code" placeholder="01"></label><label>Kategória<select name="category">${categoryOptions('main')}</select></label><label class="wide">Názov<input name="title" required></label><label class="wide">Popis<textarea name="description" rows="2"></textarea></label><label>Cena EUR<input name="price_eur" inputmode="decimal" placeholder="8,90"></label><label>Mena<input name="currency" value="EUR"></label><label class="wide">Alergény<input name="allergens" placeholder="1, 3, 7"></label><label class="wide">Raw text<textarea name="raw_text" rows="2"></textarea></label><label class="checkbox"><input type="checkbox" name="is_available" checked> Zobrazovať</label><div class="actions"><button type="submit">Pridať</button></div></form></section>
-    <section><h2>Položky pre ${escapeHtml(menuDate)} (${items.length})</h2>${items.length ? itemRows : '<div class="card muted">Pre tento dátum nie sú žiadne položky.</div>'}</section>
+
+    <div class="tabs">
+      <button class="tab-btn" data-tab="polozky">Položky</button>
+      <button class="tab-btn" data-tab="restauracie">Reštaurácie</button>
+      <button class="tab-btn" data-tab="lokality">Lokality</button>
+    </div>
+
+    <div id="tab-polozky" class="tab-panel">
+      <section class="card"><h2>Pridať položku</h2><form class="grid" method="post" action="/admin/items/create"><input type="hidden" name="_tab" value="polozky"><label>Dátum<input type="date" name="menu_date" value="${escapeHtml(menuDate)}"></label><label>Reštaurácia<select name="source_id">${sourceOptions()}</select></label><label>Kód<input name="menu_code" placeholder="01"></label><label>Kategória<select name="category">${categoryOptions('main')}</select></label><label class="wide">Názov<input name="title" required></label><label class="wide">Popis<textarea name="description" rows="2"></textarea></label><label>Cena EUR<input name="price_eur" inputmode="decimal" placeholder="8,90"></label><label>Mena<input name="currency" value="EUR"></label><label class="wide">Alergény<input name="allergens" placeholder="1, 3, 7"></label><label class="wide">Raw text<textarea name="raw_text" rows="2"></textarea></label><label class="checkbox"><input type="checkbox" name="is_available" checked> Zobrazovať</label><div class="actions"><button type="submit">Pridať</button></div></form></section>
+      <section><h2>Položky pre ${escapeHtml(menuDate)} (${items.length})</h2>${items.length ? itemRows : '<div class="card muted">Pre tento dátum nie sú žiadne položky.</div>'}</section>
+    </div>
+
+    <div id="tab-restauracie" class="tab-panel">
+      <section class="card">
+        <h2>Reštaurácie</h2>
+        <p class="muted">Lokalita určuje skupinu, pod ktorou sa reštaurácia zobrazí na hlavnej stránke.</p>
+        ${restaurantRows}
+      </section>
+    </div>
+
+    <div id="tab-lokality" class="tab-panel">
+      <section class="card">
+        <h2>Lokality</h2>
+        <p class="muted">Nižšia váha = lokalita sa zobrazí skôr na hlavnej stránke.</p>
+        ${locationRows || '<p class="muted">Žiadne lokality.</p>'}
+        <div class="add-location-form">
+          <form method="post" action="/admin/locations/create" style="display:flex;align-items:flex-end;gap:10px;flex-wrap:wrap">
+            <input type="hidden" name="_tab" value="lokality">
+            <label>Názov novej lokality<input name="name" placeholder="napr. Centrum" style="width:180px"></label>
+            <label>Váha<input type="number" name="weight" value="100" min="0" max="9999" style="width:90px"></label>
+            <button type="submit">Pridať lokalitu</button>
+          </form>
+        </div>
+      </section>
+    </div>
   </main>
+  <script>
+    const TABS = ['polozky', 'restauracie', 'lokality'];
+    function activateTab(name) {
+      if (!TABS.includes(name)) name = 'polozky';
+      TABS.forEach((t) => {
+        document.getElementById('tab-' + t).classList.toggle('active', t === name);
+      });
+      document.querySelectorAll('.tab-btn').forEach((btn) => {
+        btn.classList.toggle('active', btn.dataset.tab === name);
+      });
+      history.replaceState(null, '', location.pathname + location.search + '#' + name);
+    }
+    document.querySelectorAll('.tab-btn').forEach((btn) => {
+      btn.addEventListener('click', () => activateTab(btn.dataset.tab));
+    });
+    const initial = '${escapeHtml(activeTab)}' || (location.hash.slice(1)) || 'polozky';
+    activateTab(initial);
+  </script>
 </body>
 </html>`;
 }
@@ -722,6 +862,7 @@ async function adminGet(req, res, url) {
     menuDate,
     notice: url.searchParams.get('notice') || '',
     error: url.searchParams.get('error') || '',
+    activeTab: url.searchParams.get('tab') || 'polozky',
   }), { 'set-cookie': adminCookie() });
 }
 
@@ -737,16 +878,20 @@ async function adminPost(req, res, url) {
 
   const form = await readForm(req);
   const menuDate = clean(form.menu_date, todayIso());
+  const tab = clean(form._tab, 'polozky');
   try {
     if (url.pathname === '/admin/items/create') await createItem(form);
     else if (url.pathname === '/admin/items/update') await updateItem(form);
     else if (url.pathname === '/admin/items/delete') await deleteItem(form);
     else if (url.pathname === '/admin/restaurants/update') await updateRestaurant(form);
+    else if (url.pathname === '/admin/locations/create') await createLocation(form);
+    else if (url.pathname === '/admin/locations/update') await updateLocation(form);
+    else if (url.pathname === '/admin/locations/delete') await deleteLocation(form);
     else return sendHtml(res, 404, '<h1>404</h1>');
 
-    redirect(res, `/admin?date=${encodeURIComponent(menuDate)}&notice=${encodeURIComponent('Zmena bola uložená.')}`);
+    redirect(res, `/admin?date=${encodeURIComponent(menuDate)}&tab=${encodeURIComponent(tab)}&notice=${encodeURIComponent('Zmena bola uložená.')}`);
   } catch (err) {
-    redirect(res, `/admin?date=${encodeURIComponent(menuDate)}&error=${encodeURIComponent(err.message)}`);
+    redirect(res, `/admin?date=${encodeURIComponent(menuDate)}&tab=${encodeURIComponent(tab)}&error=${encodeURIComponent(err.message)}`);
   }
 }
 
