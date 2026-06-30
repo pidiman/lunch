@@ -666,13 +666,24 @@ function renderLogin(message = '') {
 }
 
 function renderAdminPage({ items, sources, locations, menuDate, notice = '', error = '', activeTab = 'polozky' }) {
-  const sourceOptions = (selected = '') => sources.map((source) => `
-    <option value="${escapeHtml(source.source_id)}" ${source.source_id === selected ? 'selected' : ''}>${escapeHtml(source.source_name)} (${escapeHtml(source.source_id)})</option>
-  `).join('');
+  const tw = {
+    input: 'mt-1 w-full border border-gray-300 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-gray-900',
+    label: 'block text-xs font-bold text-gray-500 uppercase tracking-wide',
+    btnGreen: 'px-4 py-2 bg-green-600 hover:bg-green-700 text-white text-sm font-bold rounded-full cursor-pointer border-0',
+    btnRed: 'px-4 py-2 bg-red-600 hover:bg-red-700 text-white text-sm font-bold rounded-full cursor-pointer border-0',
+    btnGray: 'px-4 py-2 bg-gray-800 hover:bg-gray-700 text-white text-sm font-bold rounded-full cursor-pointer border-0',
+    btnOutline: 'px-4 py-2 bg-white hover:bg-gray-50 text-gray-700 text-sm font-bold rounded-full cursor-pointer border border-gray-300',
+    th: 'px-4 py-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wider',
+    td: 'px-4 py-3 text-sm text-gray-900',
+  };
 
-  const categoryOptions = (selected = 'main') => CATEGORIES.map((category) => `
-    <option value="${category}" ${category === selected ? 'selected' : ''}>${escapeHtml(categoryLabel(category))}</option>
-  `).join('');
+  const sourceOptions = (selected = '') => sources.map((s) =>
+    `<option value="${escapeHtml(s.source_id)}" ${s.source_id === selected ? 'selected' : ''}>${escapeHtml(s.source_name)} (${escapeHtml(s.source_id)})</option>`
+  ).join('');
+
+  const categoryOptions = (selected = 'main') => CATEGORIES.map((c) =>
+    `<option value="${c}" ${c === selected ? 'selected' : ''}>${escapeHtml(categoryLabel(c))}</option>`
+  ).join('');
 
   const locationOptions = (selected = 'Praca') => {
     const names = locations.length ? locations.map((l) => l.name) : LOCATION_OPTIONS;
@@ -680,61 +691,92 @@ function renderAdminPage({ items, sources, locations, menuDate, notice = '', err
     return opts + (!names.includes(selected) ? `<option value="${escapeHtml(selected)}" selected>${escapeHtml(selected)}</option>` : '');
   };
 
-  const restaurantRows = sources.map((source) => `
-    <form class="restaurant-row" method="post" action="/admin/restaurants/update">
-      <input type="hidden" name="_tab" value="restauracie">
-      <input type="hidden" name="source_id" value="${escapeHtml(source.source_id)}">
-      <div><strong>${escapeHtml(source.source_name)}</strong><small>${escapeHtml(source.source_id)} · ${escapeHtml(source.source_type)}</small></div>
-      <select name="source_location">${locationOptions(source.source_location || 'Praca')}</select>
-      <button type="submit">Uložiť</button>
-    </form>
+  const restaurantTableRows = sources.map((src) => `
+    <tr class="hover:bg-gray-50">
+      <td class="${tw.td}">
+        <div class="font-semibold">${escapeHtml(src.source_name)}</div>
+        <div class="text-xs text-gray-400 mt-0.5">${escapeHtml(src.source_id)}</div>
+      </td>
+      <td class="${tw.td} text-gray-500">${escapeHtml(src.source_type)}</td>
+      <td class="${tw.td}">
+        <form class="flex items-center gap-2 flex-wrap" method="post" action="/admin/restaurants/update">
+          <input type="hidden" name="_tab" value="restauracie">
+          <input type="hidden" name="source_id" value="${escapeHtml(src.source_id)}">
+          <select name="source_location" class="border border-gray-300 rounded-lg px-3 py-1.5 text-sm bg-white">${locationOptions(src.source_location || 'Praca')}</select>
+          <button type="submit" class="${tw.btnGreen}">Uložiť</button>
+        </form>
+      </td>
+    </tr>
   `).join('');
 
-  const locationRows = locations.map((loc) => `
-    <div class="location-row">
-      <div class="location-info"><strong>${escapeHtml(loc.name)}</strong><small>Váha: ${escapeHtml(String(loc.weight))}</small></div>
-      <form class="location-edit" method="post" action="/admin/locations/update">
-        <input type="hidden" name="_tab" value="lokality">
-        <input type="hidden" name="name" value="${escapeHtml(loc.name)}">
-        <label>Váha<input type="number" name="weight" value="${escapeHtml(String(loc.weight))}" min="0" max="9999" style="width:90px"></label>
-        <button type="submit">Uložiť</button>
-      </form>
-      <form method="post" action="/admin/locations/delete" onsubmit="return confirm('Naozaj zmazať lokalitu ${escapeHtml(loc.name)}?')">
-        <input type="hidden" name="_tab" value="lokality">
-        <input type="hidden" name="name" value="${escapeHtml(loc.name)}">
-        <button class="danger-sm" type="submit">Zmazať</button>
-      </form>
-    </div>
+  const locationTableRows = locations.map((loc) => `
+    <tr class="hover:bg-gray-50">
+      <td class="${tw.td} font-semibold">${escapeHtml(loc.name)}</td>
+      <td class="${tw.td}">
+        <form class="flex items-center gap-2" method="post" action="/admin/locations/update">
+          <input type="hidden" name="_tab" value="lokality">
+          <input type="hidden" name="name" value="${escapeHtml(loc.name)}">
+          <input type="number" name="weight" value="${escapeHtml(String(loc.weight))}" min="0" max="9999" class="border border-gray-300 rounded-lg px-3 py-1.5 text-sm bg-white w-24">
+          <button type="submit" class="${tw.btnGreen}">Uložiť</button>
+        </form>
+      </td>
+      <td class="${tw.td}">
+        <form method="post" action="/admin/locations/delete" onsubmit="return confirm('Naozaj zmazať lokalitu ${escapeHtml(loc.name)}?')">
+          <input type="hidden" name="_tab" value="lokality">
+          <input type="hidden" name="name" value="${escapeHtml(loc.name)}">
+          <button type="submit" class="${tw.btnRed}">Zmazať</button>
+        </form>
+      </td>
+    </tr>
   `).join('');
 
-  const itemRows = items.map((item) => {
+  const itemTableRows = items.map((item) => {
     const dateValue = String(item.menu_date).slice(0, 10);
     const itemAllergens = Array.isArray(item.allergens) ? item.allergens.join(', ') : '';
+    const editId = `edit-${escapeHtml(item.id)}`;
     return `
-      <details class="admin-item">
-        <summary><span><strong>${escapeHtml(item.menu_code || '—')} · ${escapeHtml(item.title)}</strong><small>${escapeHtml(item.source_name || '')}</small></span><b>${escapeHtml(euro(item.price_eur))}</b></summary>
-        <form class="grid" method="post" action="/admin/items/update">
-          <input type="hidden" name="_tab" value="polozky">
-          <input type="hidden" name="id" value="${escapeHtml(item.id)}">
-          <label>Dátum<input type="date" name="menu_date" value="${escapeHtml(dateValue)}"></label>
-          <label>Reštaurácia<select name="source_id">${sourceOptions(item.source_id)}</select></label>
-          <label>Kód<input name="menu_code" value="${escapeHtml(item.menu_code || '')}"></label>
-          <label>Kategória<select name="category">${categoryOptions(item.category || 'main')}</select></label>
-          <label class="wide">Názov<input name="title" value="${escapeHtml(item.title || '')}" required></label>
-          <label class="wide">Popis<textarea name="description" rows="2">${escapeHtml(item.description || '')}</textarea></label>
-          <label>Cena EUR<input name="price_eur" inputmode="decimal" value="${escapeHtml(item.price_eur ?? '')}"></label>
-          <label>Mena<input name="currency" value="${escapeHtml(item.currency || 'EUR')}"></label>
-          <label class="wide">Alergény<input name="allergens" value="${escapeHtml(itemAllergens)}" placeholder="1, 3, 7"></label>
-          <label class="wide">Raw text<textarea name="raw_text" rows="2">${escapeHtml(item.raw_text || '')}</textarea></label>
-          <label class="checkbox"><input type="checkbox" name="is_available" ${item.is_available ? 'checked' : ''}> Zobrazovať</label>
-          <div class="actions"><button type="submit">Uložiť</button></div>
-        </form>
-        <form method="post" action="/admin/items/delete" onsubmit="return confirm('Naozaj zmazať položku?')">
-          <input type="hidden" name="_tab" value="polozky">
-          <input type="hidden" name="id" value="${escapeHtml(item.id)}">
-          <button class="danger" type="submit">Zmazať</button>
-        </form>
-      </details>
+      <tr class="hover:bg-gray-50 border-b border-gray-100">
+        <td class="px-4 py-3 text-sm font-mono text-gray-400 whitespace-nowrap">${escapeHtml(item.menu_code || '—')}</td>
+        <td class="${tw.td}">
+          <div class="font-semibold">${escapeHtml(item.title)}</div>
+          <div class="text-xs text-gray-400 mt-0.5">${escapeHtml(item.source_name || '')}</div>
+        </td>
+        <td class="${tw.td} text-gray-500 whitespace-nowrap">${escapeHtml(categoryLabel(item.category || 'main'))}</td>
+        <td class="${tw.td} font-semibold whitespace-nowrap">${escapeHtml(euro(item.price_eur))}</td>
+        <td class="${tw.td}">
+          <div class="flex gap-2 flex-wrap">
+            <button type="button" onclick="toggleRow('${editId}')" class="${tw.btnGray}">Upraviť</button>
+            <form method="post" action="/admin/items/delete" onsubmit="return confirm('Naozaj zmazať položku?')">
+              <input type="hidden" name="_tab" value="polozky">
+              <input type="hidden" name="id" value="${escapeHtml(item.id)}">
+              <button type="submit" class="${tw.btnRed}">Zmazať</button>
+            </form>
+          </div>
+        </td>
+      </tr>
+      <tr id="${editId}" class="hidden bg-gray-50 border-b border-gray-200">
+        <td colspan="5" class="px-4 py-4">
+          <form class="grid grid-cols-2 md:grid-cols-4 gap-3" method="post" action="/admin/items/update">
+            <input type="hidden" name="_tab" value="polozky">
+            <input type="hidden" name="id" value="${escapeHtml(item.id)}">
+            <label class="block"><span class="${tw.label}">Dátum</span><input type="date" name="menu_date" value="${escapeHtml(dateValue)}" class="${tw.input}"></label>
+            <label class="block"><span class="${tw.label}">Reštaurácia</span><select name="source_id" class="${tw.input}">${sourceOptions(item.source_id)}</select></label>
+            <label class="block"><span class="${tw.label}">Kód</span><input name="menu_code" value="${escapeHtml(item.menu_code || '')}" class="${tw.input}"></label>
+            <label class="block"><span class="${tw.label}">Kategória</span><select name="category" class="${tw.input}">${categoryOptions(item.category || 'main')}</select></label>
+            <label class="block col-span-2"><span class="${tw.label}">Názov</span><input name="title" value="${escapeHtml(item.title || '')}" required class="${tw.input}"></label>
+            <label class="block col-span-2"><span class="${tw.label}">Popis</span><textarea name="description" rows="2" class="${tw.input} resize-y">${escapeHtml(item.description || '')}</textarea></label>
+            <label class="block"><span class="${tw.label}">Cena EUR</span><input name="price_eur" inputmode="decimal" value="${escapeHtml(item.price_eur ?? '')}" class="${tw.input}"></label>
+            <label class="block"><span class="${tw.label}">Mena</span><input name="currency" value="${escapeHtml(item.currency || 'EUR')}" class="${tw.input}"></label>
+            <label class="block col-span-2"><span class="${tw.label}">Alergény</span><input name="allergens" value="${escapeHtml(itemAllergens)}" placeholder="1, 3, 7" class="${tw.input}"></label>
+            <label class="block col-span-4"><span class="${tw.label}">Raw text</span><textarea name="raw_text" rows="2" class="${tw.input} resize-y">${escapeHtml(item.raw_text || '')}</textarea></label>
+            <label class="flex items-center gap-2 text-sm col-span-2"><input type="checkbox" name="is_available" ${item.is_available ? 'checked' : ''} class="rounded"> Zobrazovať</label>
+            <div class="col-span-2 flex justify-end items-end gap-2">
+              <button type="button" onclick="toggleRow('${editId}')" class="${tw.btnOutline}">Zrušiť</button>
+              <button type="submit" class="${tw.btnGreen}">Uložiť</button>
+            </div>
+          </form>
+        </td>
+      </tr>
     `;
   }).join('');
 
@@ -744,92 +786,145 @@ function renderAdminPage({ items, sources, locations, menuDate, notice = '', err
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Admin · ${escapeHtml(SITE_TITLE)}</title>
-  <style>
-    :root{--bg:#f3f4f6;--card:#fff;--text:#111827;--muted:#6b7280;--border:#e5e7eb;--green:#16a34a;--danger:#dc2626;--shadow:0 14px 34px rgba(15,23,42,.08)}
-    *{box-sizing:border-box}
-    body{margin:0;font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;background:var(--bg);color:var(--text)}
-    .admin-page{width:min(1180px,100%);margin:0 auto;padding:18px}
-    .top{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:14px}
-    h1{margin:0;font-size:clamp(30px,7vw,54px);letter-spacing:-.06em;line-height:.95}
-    .nav{display:flex;align-items:flex-start;gap:8px;flex-wrap:wrap;justify-content:flex-end}
-    .nav a{display:inline-flex;align-items:center;justify-content:center;padding:11px 14px;border-radius:999px;background:#111827;color:#fff;font-size:14px;font-weight:900;line-height:1.2;text-decoration:none;white-space:nowrap}
-    .card,.admin-item{background:var(--card);border:1px solid var(--border);border-radius:22px;box-shadow:var(--shadow)}
-    .card{padding:16px;margin-bottom:14px}
-    .tabs{display:flex;gap:6px;margin-bottom:16px;flex-wrap:wrap}
-    .tab-btn{padding:10px 20px;border:1px solid var(--border);border-radius:999px;background:var(--card);color:var(--muted);font-weight:800;font-size:14px;cursor:pointer;transition:all .15s}
-    .tab-btn.active{background:#111827;color:#fff;border-color:#111827}
-    .tab-panel{display:none}.tab-panel.active{display:block}
-    .toolbar{display:flex;align-items:flex-end;gap:10px;flex-wrap:wrap}
-    .restaurant-row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:12px;border:1px solid var(--border);border-radius:16px;margin-top:10px;background:#fff;flex-wrap:wrap}
-    .restaurant-row small{display:block;color:var(--muted);margin-top:3px}
-    .location-row{display:flex;align-items:center;gap:12px;padding:12px;border:1px solid var(--border);border-radius:16px;margin-top:10px;background:#fff;flex-wrap:wrap}
-    .location-info{flex:1 1 auto}.location-info small{display:block;color:var(--muted);margin-top:3px}
-    .location-edit{display:flex;align-items:flex-end;gap:8px}
-    label{display:grid;gap:6px;font-size:12px;font-weight:900;color:#374151;text-transform:uppercase;letter-spacing:.06em}
-    input,select,textarea{width:100%;border:1px solid var(--border);border-radius:12px;padding:11px 12px;font:inherit;background:#fff;color:var(--text)}
-    textarea{resize:vertical}
-    .grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:12px}
-    .wide{grid-column:span 2}
-    .checkbox{display:flex;align-items:center;gap:8px;text-transform:none;letter-spacing:0;font-size:14px}.checkbox input{width:auto}
-    .actions{display:flex;align-items:end}
-    button{display:inline-flex;align-items:center;justify-content:center;border:0;border-radius:999px;padding:11px 14px;background:var(--green);color:#fff;font-weight:900;font-size:14px;line-height:1.2;cursor:pointer;white-space:nowrap}
-    .danger{background:var(--danger);margin:0 0 14px 14px}
-    .danger-sm{background:var(--danger);padding:8px 12px;font-size:13px}
-    .notice{padding:12px 14px;border-radius:14px;background:#dcfce7;color:#166534;font-weight:800;margin-bottom:12px}
-    .error{padding:12px 14px;border-radius:14px;background:#fee2e2;color:#991b1b;font-weight:800;margin-bottom:12px}
-    .admin-item{margin-bottom:10px;overflow:hidden}
-    summary{display:flex;justify-content:space-between;gap:12px;align-items:center;padding:14px 16px;cursor:pointer}
-    summary small{display:block;color:var(--muted);font-weight:700;margin-top:3px}.admin-item form{padding:0 14px 14px}.muted{color:var(--muted)}
-    .add-location-form{display:flex;align-items:flex-end;gap:10px;flex-wrap:wrap;margin-top:14px;padding-top:14px;border-top:1px solid var(--border)}
-    @media(max-width:720px){.admin-page{padding:10px}.top{display:block}.nav{justify-content:flex-start;margin-top:12px}.grid{grid-template-columns:1fr}.wide{grid-column:auto}.restaurant-row,.location-row{flex-direction:column;align-items:stretch}.toolbar{flex-direction:column}.location-edit{flex-wrap:wrap}summary{align-items:flex-start}}
-  </style>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>.tab-panel{display:none}.tab-panel.active{display:block}</style>
 </head>
-<body>
-  <main class="admin-page">
-    <div class="top">
-      <div><h1>Admin menu</h1><p class="muted">Správa položiek, reštaurácií a lokalít.</p></div>
-      <div class="nav"><a href="/">Web</a><a href="/admin/logout">Odhlásiť</a></div>
-    </div>
-    ${notice ? `<div class="notice">${escapeHtml(notice)}</div>` : ''}
-    ${error ? `<div class="error">${escapeHtml(error)}</div>` : ''}
-    <section class="card"><form class="toolbar" method="get" action="/admin"><label>Dátum<input type="date" name="date" value="${escapeHtml(menuDate)}"></label><button type="submit">Filtrovať</button></form></section>
+<body class="bg-gray-100 text-gray-900 min-h-screen antialiased">
+  <main class="max-w-6xl mx-auto px-4 py-6">
 
-    <div class="tabs">
-      <button class="tab-btn" data-tab="polozky">Položky</button>
-      <button class="tab-btn" data-tab="restauracie">Reštaurácie</button>
-      <button class="tab-btn" data-tab="lokality">Lokality</button>
+    <div class="flex justify-between items-start gap-4 mb-6 flex-wrap">
+      <div>
+        <h1 class="text-4xl font-black tracking-tight leading-none">Admin menu</h1>
+        <p class="text-gray-500 mt-1 text-sm">Správa položiek, reštaurácií a lokalít.</p>
+      </div>
+      <div class="flex gap-2">
+        <a href="/" class="${tw.btnGray} no-underline">Web</a>
+        <a href="/admin/logout" class="${tw.btnGray} no-underline">Odhlásiť</a>
+      </div>
     </div>
 
+    ${notice ? `<div class="mb-4 px-4 py-3 bg-green-50 border border-green-200 text-green-800 font-semibold rounded-xl text-sm">${escapeHtml(notice)}</div>` : ''}
+    ${error ? `<div class="mb-4 px-4 py-3 bg-red-50 border border-red-200 text-red-800 font-semibold rounded-xl text-sm">${escapeHtml(error)}</div>` : ''}
+
+    <div class="bg-white border border-gray-200 rounded-2xl shadow-sm p-4 mb-4">
+      <form class="flex items-end gap-3 flex-wrap" method="get" action="/admin">
+        <label class="block"><span class="${tw.label}">Dátum</span><input type="date" name="date" value="${escapeHtml(menuDate)}" class="${tw.input}"></label>
+        <button type="submit" class="${tw.btnGray}">Filtrovať</button>
+      </form>
+    </div>
+
+    <div class="flex gap-2 mb-4 flex-wrap">
+      <button class="tab-btn px-5 py-2 rounded-full text-sm font-bold border cursor-pointer" data-tab="polozky">Položky</button>
+      <button class="tab-btn px-5 py-2 rounded-full text-sm font-bold border cursor-pointer" data-tab="restauracie">Reštaurácie</button>
+      <button class="tab-btn px-5 py-2 rounded-full text-sm font-bold border cursor-pointer" data-tab="lokality">Lokality</button>
+    </div>
+
+    <!-- TAB: Položky -->
     <div id="tab-polozky" class="tab-panel">
-      <section class="card"><h2>Pridať položku</h2><form class="grid" method="post" action="/admin/items/create"><input type="hidden" name="_tab" value="polozky"><label>Dátum<input type="date" name="menu_date" value="${escapeHtml(menuDate)}"></label><label>Reštaurácia<select name="source_id">${sourceOptions()}</select></label><label>Kód<input name="menu_code" placeholder="01"></label><label>Kategória<select name="category">${categoryOptions('main')}</select></label><label class="wide">Názov<input name="title" required></label><label class="wide">Popis<textarea name="description" rows="2"></textarea></label><label>Cena EUR<input name="price_eur" inputmode="decimal" placeholder="8,90"></label><label>Mena<input name="currency" value="EUR"></label><label class="wide">Alergény<input name="allergens" placeholder="1, 3, 7"></label><label class="wide">Raw text<textarea name="raw_text" rows="2"></textarea></label><label class="checkbox"><input type="checkbox" name="is_available" checked> Zobrazovať</label><div class="actions"><button type="submit">Pridať</button></div></form></section>
-      <section><h2>Položky pre ${escapeHtml(menuDate)} (${items.length})</h2>${items.length ? itemRows : '<div class="card muted">Pre tento dátum nie sú žiadne položky.</div>'}</section>
+      <div class="bg-white border border-gray-200 rounded-2xl shadow-sm p-5 mb-4">
+        <h2 class="text-base font-bold mb-3">Pridať položku</h2>
+        <form class="grid grid-cols-2 md:grid-cols-4 gap-3" method="post" action="/admin/items/create">
+          <input type="hidden" name="_tab" value="polozky">
+          <label class="block"><span class="${tw.label}">Dátum</span><input type="date" name="menu_date" value="${escapeHtml(menuDate)}" class="${tw.input}"></label>
+          <label class="block"><span class="${tw.label}">Reštaurácia</span><select name="source_id" class="${tw.input}">${sourceOptions()}</select></label>
+          <label class="block"><span class="${tw.label}">Kód</span><input name="menu_code" placeholder="01" class="${tw.input}"></label>
+          <label class="block"><span class="${tw.label}">Kategória</span><select name="category" class="${tw.input}">${categoryOptions('main')}</select></label>
+          <label class="block col-span-2"><span class="${tw.label}">Názov</span><input name="title" required class="${tw.input}"></label>
+          <label class="block col-span-2"><span class="${tw.label}">Popis</span><textarea name="description" rows="2" class="${tw.input} resize-y"></textarea></label>
+          <label class="block"><span class="${tw.label}">Cena EUR</span><input name="price_eur" inputmode="decimal" placeholder="8,90" class="${tw.input}"></label>
+          <label class="block"><span class="${tw.label}">Mena</span><input name="currency" value="EUR" class="${tw.input}"></label>
+          <label class="block col-span-2"><span class="${tw.label}">Alergény</span><input name="allergens" placeholder="1, 3, 7" class="${tw.input}"></label>
+          <label class="block col-span-4"><span class="${tw.label}">Raw text</span><textarea name="raw_text" rows="2" class="${tw.input} resize-y"></textarea></label>
+          <label class="flex items-center gap-2 text-sm col-span-3"><input type="checkbox" name="is_available" checked class="rounded"> Zobrazovať</label>
+          <div class="flex justify-end items-end"><button type="submit" class="${tw.btnGreen}">Pridať</button></div>
+        </form>
+      </div>
+
+      <div class="bg-white border border-gray-200 rounded-2xl shadow-sm overflow-hidden">
+        <div class="px-5 py-3 border-b border-gray-100 flex items-center justify-between">
+          <h2 class="text-base font-bold">Položky pre ${escapeHtml(menuDate)}</h2>
+          <span class="text-sm text-gray-400">${items.length} položiek</span>
+        </div>
+        ${items.length ? `
+        <div class="overflow-x-auto">
+          <table class="min-w-full divide-y divide-gray-100">
+            <thead class="bg-gray-50">
+              <tr>
+                <th class="${tw.th}">Kód</th>
+                <th class="${tw.th}">Názov</th>
+                <th class="${tw.th}">Kategória</th>
+                <th class="${tw.th}">Cena</th>
+                <th class="${tw.th}">Akcie</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-gray-100 bg-white">
+              ${itemTableRows}
+            </tbody>
+          </table>
+        </div>
+        ` : '<p class="px-5 py-6 text-sm text-gray-400">Pre tento dátum nie sú žiadne položky.</p>'}
+      </div>
     </div>
 
+    <!-- TAB: Reštaurácie -->
     <div id="tab-restauracie" class="tab-panel">
-      <section class="card">
-        <h2>Reštaurácie</h2>
-        <p class="muted">Lokalita určuje skupinu, pod ktorou sa reštaurácia zobrazí na hlavnej stránke.</p>
-        ${restaurantRows}
-      </section>
+      <div class="bg-white border border-gray-200 rounded-2xl shadow-sm overflow-hidden">
+        <div class="px-5 py-3 border-b border-gray-100">
+          <h2 class="text-base font-bold">Reštaurácie</h2>
+          <p class="text-sm text-gray-400 mt-0.5">Lokalita určuje skupinu, pod ktorou sa reštaurácia zobrazí na hlavnej stránke.</p>
+        </div>
+        <div class="overflow-x-auto">
+          <table class="min-w-full divide-y divide-gray-100">
+            <thead class="bg-gray-50">
+              <tr>
+                <th class="${tw.th}">Reštaurácia</th>
+                <th class="${tw.th}">Typ</th>
+                <th class="${tw.th}">Lokalita</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-gray-100 bg-white">
+              ${restaurantTableRows}
+            </tbody>
+          </table>
+        </div>
+      </div>
     </div>
 
+    <!-- TAB: Lokality -->
     <div id="tab-lokality" class="tab-panel">
-      <section class="card">
-        <h2>Lokality</h2>
-        <p class="muted">Nižšia váha = lokalita sa zobrazí skôr na hlavnej stránke.</p>
-        ${locationRows || '<p class="muted">Žiadne lokality.</p>'}
-        <div class="add-location-form">
-          <form method="post" action="/admin/locations/create" style="display:flex;align-items:flex-end;gap:10px;flex-wrap:wrap">
+      <div class="bg-white border border-gray-200 rounded-2xl shadow-sm overflow-hidden">
+        <div class="px-5 py-3 border-b border-gray-100">
+          <h2 class="text-base font-bold">Lokality</h2>
+          <p class="text-sm text-gray-400 mt-0.5">Nižšia váha = lokalita sa zobrazí skôr na hlavnej stránke.</p>
+        </div>
+        <div class="overflow-x-auto">
+          <table class="min-w-full divide-y divide-gray-100">
+            <thead class="bg-gray-50">
+              <tr>
+                <th class="${tw.th}">Lokalita</th>
+                <th class="${tw.th}">Váha</th>
+                <th class="${tw.th}">Akcie</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-gray-100 bg-white">
+              ${locationTableRows || `<tr><td colspan="3" class="px-5 py-6 text-sm text-gray-400">Žiadne lokality.</td></tr>`}
+            </tbody>
+          </table>
+        </div>
+        <div class="px-5 py-4 border-t border-gray-100 bg-gray-50">
+          <form class="flex items-end gap-3 flex-wrap" method="post" action="/admin/locations/create">
             <input type="hidden" name="_tab" value="lokality">
-            <label>Názov novej lokality<input name="name" placeholder="napr. Centrum" style="width:180px"></label>
-            <label>Váha<input type="number" name="weight" value="100" min="0" max="9999" style="width:90px"></label>
-            <button type="submit">Pridať lokalitu</button>
+            <label class="block"><span class="${tw.label}">Nová lokalita</span><input name="name" placeholder="napr. Centrum" class="${tw.input} w-44"></label>
+            <label class="block"><span class="${tw.label}">Váha</span><input type="number" name="weight" value="100" min="0" max="9999" class="${tw.input} w-24"></label>
+            <div class="flex items-end"><button type="submit" class="${tw.btnGreen}">Pridať lokalitu</button></div>
           </form>
         </div>
-      </section>
+      </div>
     </div>
+
   </main>
   <script>
+    function toggleRow(id) { document.getElementById(id).classList.toggle('hidden'); }
     const TABS = ['polozky', 'restauracie', 'lokality'];
     function activateTab(name) {
       if (!TABS.includes(name)) name = 'polozky';
@@ -837,15 +932,14 @@ function renderAdminPage({ items, sources, locations, menuDate, notice = '', err
         document.getElementById('tab-' + t).classList.toggle('active', t === name);
       });
       document.querySelectorAll('.tab-btn').forEach((btn) => {
-        btn.classList.toggle('active', btn.dataset.tab === name);
+        const on = btn.dataset.tab === name;
+        btn.className = 'tab-btn px-5 py-2 rounded-full text-sm font-bold border cursor-pointer ' +
+          (on ? 'bg-gray-900 text-white border-gray-900' : 'bg-white text-gray-500 border-gray-200 hover:bg-gray-50');
       });
       history.replaceState(null, '', location.pathname + location.search + '#' + name);
     }
-    document.querySelectorAll('.tab-btn').forEach((btn) => {
-      btn.addEventListener('click', () => activateTab(btn.dataset.tab));
-    });
-    const initial = '${escapeHtml(activeTab)}' || (location.hash.slice(1)) || 'polozky';
-    activateTab(initial);
+    document.querySelectorAll('.tab-btn').forEach((btn) => btn.addEventListener('click', () => activateTab(btn.dataset.tab)));
+    activateTab('${escapeHtml(activeTab)}' || location.hash.slice(1) || 'polozky');
   </script>
 </body>
 </html>`;
