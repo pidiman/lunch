@@ -515,47 +515,40 @@ function groupByLocationAndSource(items) {
 function renderMenuItem(item, index = 0) {
   const code = clean(item.menu_code);
   const category = item.category || 'unknown';
-  const extra = index >= 3 ? ' mobile-extra' : '';
+  const mobileExtra = index >= 3 ? ' mobile-extra' : '';
   const itemAllergens = Array.isArray(item.allergens) ? item.allergens : [];
   const itemPrice = euro(item.price_eur);
+  const chipClasses = categoryChipClasses(category);
 
   return `
-    <article class="menu-item${extra}">
+    <article class="grid grid-cols-[1fr_auto] gap-3 items-start p-4 border border-gray-200 rounded-2xl bg-gray-50${mobileExtra}">
       <div>
-        <div class="menu-item-topline">
-          ${code ? `<span class="menu-code">${escapeHtml(code)}</span>` : ''}
-          <span class="category-chip category-${escapeHtml(category)}">
+        <div class="flex items-center flex-wrap gap-2 mb-2">
+          ${code ? `<span class="inline-flex items-center justify-center min-w-[34px] h-7 px-2 rounded-full bg-gray-900 text-white text-xs font-black">${escapeHtml(code)}</span>` : ''}
+          <span class="inline-flex items-center gap-1 h-7 px-3 rounded-full text-xs font-bold ${chipClasses}">
             <span>${categoryIcon(category)}</span>${escapeHtml(categoryLabel(category))}
           </span>
         </div>
-        <h3>${escapeHtml(item.title)}</h3>
-        ${item.description ? `<p class="description">${escapeHtml(item.description)}</p>` : ''}
-        ${itemAllergens.length ? `<p class="allergens"><span>Alergény:</span> ${escapeHtml(itemAllergens.join(', '))}</p>` : ''}
+        <h3 class="m-0 text-lg font-bold leading-snug tracking-tight">${escapeHtml(item.title)}</h3>
+        ${item.description ? `<p class="mt-2 text-sm text-gray-500 leading-relaxed">${escapeHtml(item.description)}</p>` : ''}
+        ${itemAllergens.length ? `<p class="mt-2 text-xs text-gray-400"><span class="font-bold">Alergény:</span> ${escapeHtml(itemAllergens.join(', '))}</p>` : ''}
       </div>
-      ${itemPrice ? `<div class="price-badge">${escapeHtml(itemPrice)}</div>` : ''}
+      ${itemPrice ? `<div class="sticky top-3 px-3 py-2 rounded-full bg-gray-900 text-white font-black text-sm whitespace-nowrap">${escapeHtml(itemPrice)}</div>` : ''}
     </article>
   `;
 }
 
-const publicCss = `
-  :root{--bg:#f3f4f6;--soft:#f9fafb;--text:#111827;--muted:#6b7280;--border:#e5e7eb;--shadow:0 18px 45px rgba(15,23,42,.10);font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;background:var(--bg);color:var(--text)}
-  *{box-sizing:border-box}
-  body{margin:0;background:radial-gradient(circle at top left,rgba(34,197,94,.18),transparent 34rem),var(--bg)}
-  a{color:inherit}
-  .page{width:min(1040px,100%);margin:0 auto;padding:18px}
-  .hero{border-radius:28px;padding:28px;color:#fff;background:linear-gradient(135deg,rgba(17,24,39,.98),rgba(22,101,52,.92)),#111827;box-shadow:var(--shadow)}
-  .hero-top{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;margin-bottom:30px}
-  .app-pill{display:inline-flex;align-items:center;gap:8px;padding:9px 13px;border:1px solid rgba(255,255,255,.18);border-radius:999px;background:rgba(255,255,255,.10);font-size:13px;font-weight:700;line-height:1.2}
-  .hero h1{margin:0;font-size:clamp(34px,8vw,64px);line-height:.95;letter-spacing:-.06em}
-  .hero-subtitle{max-width:640px;margin:16px 0 0;color:rgba(255,255,255,.78);font-size:clamp(15px,3.8vw,19px);line-height:1.5}
-  .date-card{flex:0 0 auto;min-width:164px;padding:14px 16px;border-radius:18px;background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.16);text-align:right;align-self:flex-start;line-height:1.2}
-  .date-card strong{display:block;font-size:14px}
-  .date-card span{display:block;margin-top:4px;color:rgba(255,255,255,.72);font-size:12px}
-  .mobile-date-inline{display:none}
-  .stats{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:26px}.stat{padding:14px;border-radius:18px;background:rgba(255,255,255,.10);border:1px solid rgba(255,255,255,.14)}.stat strong{display:block;font-size:24px;line-height:1}.stat span{display:block;margin-top:6px;color:rgba(255,255,255,.70);font-size:12px;font-weight:600}
-  .content{margin-top:18px;display:grid;gap:18px}.location-title{margin:8px 4px -4px;font-size:28px;letter-spacing:-.04em}.restaurant-card,.empty-state,.error-state{border:1px solid rgba(229,231,235,.9);border-radius:28px;background:rgba(255,255,255,.92);box-shadow:var(--shadow)}.restaurant-card{padding:18px}.restaurant-header{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:4px 4px 16px;border-bottom:1px solid var(--border)}.eyebrow{margin:0 0 4px;color:#15803d;font-size:11px;font-weight:800;letter-spacing:.12em;text-transform:uppercase}.restaurant-header h2{margin:0;font-size:clamp(22px,5vw,32px);letter-spacing:-.04em}.restaurant-toggle{display:inline-flex;align-items:baseline;gap:8px;padding:0;border:0;background:transparent;color:inherit;font:inherit;letter-spacing:inherit;text-align:left}.restaurant-count{display:grid;place-items:center;min-width:46px;height:46px;border-radius:16px;background:#dcfce7;color:#166534;font-weight:900}.mobile-toggle-text{display:none}.menu-list{display:grid;gap:12px;padding-top:16px}.menu-item{display:grid;grid-template-columns:1fr auto;gap:14px;align-items:start;padding:15px;border:1px solid var(--border);border-radius:20px;background:var(--soft)}.menu-item-topline{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:8px}.menu-code{display:inline-flex;align-items:center;justify-content:center;min-width:34px;height:28px;padding:0 9px;border-radius:999px;background:#111827;color:#fff;font-size:12px;font-weight:900}.category-chip{display:inline-flex;align-items:center;gap:5px;height:28px;padding:0 10px;border-radius:999px;background:#eef2ff;color:#3730a3;font-size:12px;font-weight:800}.category-soup{background:#ffedd5;color:#9a3412}.category-main{background:#dcfce7;color:#166534}.category-special{background:#fef3c7;color:#92400e}.category-pizza{background:#fee2e2;color:#991b1b}.menu-item h3{margin:0;font-size:clamp(17px,4vw,21px);line-height:1.22;letter-spacing:-.02em}.description{margin:8px 0 0;color:var(--muted);line-height:1.5;font-size:15px}.allergens{margin:10px 0 0;color:#6b7280;font-size:13px}.allergens span{font-weight:800}.price-badge{position:sticky;top:12px;padding:10px 12px;border-radius:999px;background:#111827;color:#fff;font-weight:900;white-space:nowrap}.source-link{display:inline-flex;align-items:center;margin-top:14px;padding:11px 14px;border-radius:999px;background:#f3f4f6;color:#374151;font-size:14px;font-weight:800;text-decoration:none;line-height:1.2}.source-link::after{content:'↗';margin-left:7px}.empty-state,.error-state{padding:26px}.footer{padding:22px 4px 10px;color:var(--muted);font-size:13px;text-align:center}
-  @media(max-width:720px){.page{padding:10px}.hero{padding:16px;border-radius:20px}.hero-top{display:block;margin-bottom:0}.app-pill,.date-card,.hero-subtitle,.stats,.stat{display:none}.hero h1{font-size:clamp(28px,9vw,40px)}.mobile-date-inline{display:flex;gap:10px;flex-wrap:wrap;margin-top:8px}.mobile-date-inline strong{font-size:14px}.mobile-date-inline span{color:rgba(255,255,255,.72);font-size:12px}.content{margin-top:12px;gap:12px}.location-title{font-size:22px;margin:8px 4px -2px}.restaurant-card{padding:12px;border-radius:20px}.restaurant-header{align-items:flex-start;padding-bottom:12px}.restaurant-toggle:not(:disabled){cursor:pointer}.restaurant-toggle:not(:disabled)::after{content:'⌄';display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;border-radius:999px;background:#dcfce7;color:#166534;font-size:18px}.restaurant-card.expanded .restaurant-toggle::after{content:'⌃'}.mobile-toggle-text{display:inline;color:var(--muted);font-size:12px;font-weight:800;letter-spacing:0;white-space:nowrap}.restaurant-card.expanded .mobile-toggle-text{display:none}.restaurant-card.mobile-collapsible:not(.expanded) .mobile-extra{display:none}.menu-list{gap:10px;padding-top:12px}.menu-item{grid-template-columns:1fr;gap:10px;padding:12px;border-radius:16px}.price-badge{position:static;justify-self:start;padding:8px 10px}.footer{padding-top:14px}}
-`;
+function categoryChipClasses(category) {
+  return {
+    soup: 'bg-orange-50 text-orange-800',
+    main: 'bg-green-50 text-green-800',
+    special: 'bg-amber-50 text-amber-800',
+    pizza: 'bg-red-50 text-red-800',
+    side: 'bg-yellow-50 text-yellow-800',
+    dessert: 'bg-pink-50 text-pink-800',
+    drink: 'bg-blue-50 text-blue-800',
+  }[category] || 'bg-indigo-50 text-indigo-800';
+}
 
 function renderPublicPage(items, error = null, lastUpdatedAt = null) {
   const today = formatDateSk(new Date());
@@ -570,25 +563,25 @@ function renderPublicPage(items, error = null, lastUpdatedAt = null) {
       const sourceUrl = rows.find((row) => row.source_url)?.source_url;
       const collapsible = rows.length > 3;
       return `
-        <section class="restaurant-card${collapsible ? ' mobile-collapsible' : ''}">
-          <div class="restaurant-header">
+        <section class="restaurant-card border border-gray-200 rounded-3xl bg-white/95 shadow-lg p-5${collapsible ? ' mobile-collapsible' : ''}">
+          <div class="flex items-center justify-between gap-4 pb-4 border-b border-gray-200">
             <div>
-              <p class="eyebrow">Reštaurácia</p>
-              <h2>
-                <button class="restaurant-toggle" type="button" aria-expanded="false" ${collapsible ? '' : 'disabled'}>
-                  <span>${escapeHtml(sourceName)}</span>${collapsible ? '<small class="mobile-toggle-text">Zobraziť všetko</small>' : ''}
+              <p class="m-0 mb-1 text-xs font-black text-green-700 uppercase tracking-widest">Reštaurácia</p>
+              <h2 class="m-0 text-2xl sm:text-3xl font-black tracking-tight">
+                <button class="restaurant-toggle inline-flex items-baseline gap-2 p-0 border-0 bg-transparent text-inherit font-[inherit] tracking-[inherit] text-left" type="button" aria-expanded="false" ${collapsible ? '' : 'disabled'}>
+                  <span>${escapeHtml(sourceName)}</span>${collapsible ? '<small class="mobile-toggle-text hidden text-xs font-bold text-gray-400 tracking-normal whitespace-nowrap">Zobraziť všetko</small>' : ''}
                 </button>
               </h2>
             </div>
-            <div class="restaurant-count">${rows.length}</div>
+            <div class="grid place-items-center min-w-[46px] h-11 rounded-2xl bg-green-100 text-green-800 font-black text-lg flex-none">${rows.length}</div>
           </div>
-          <div class="menu-list">${rows.map((row, index) => renderMenuItem(row, index)).join('')}</div>
-          ${sourceUrl ? `<a class="source-link" href="${escapeHtml(sourceUrl)}" target="_blank" rel="noreferrer">Otvoriť zdroj menu</a>` : ''}
+          <div class="menu-list grid gap-3 pt-4">${rows.map((row, index) => renderMenuItem(row, index)).join('')}</div>
+          ${sourceUrl ? `<a class="inline-flex items-center mt-4 px-4 py-2.5 rounded-full bg-gray-100 text-gray-700 text-sm font-bold no-underline hover:bg-gray-200" href="${escapeHtml(sourceUrl)}" target="_blank" rel="noreferrer">Otvoriť zdroj menu <span class="ml-1.5">↗</span></a>` : ''}
         </section>
       `;
     }).join('');
 
-    return `<h2 class="location-title">${escapeHtml(location)}</h2>${restaurants}`;
+    return `<h2 class="mt-2 mb-0 text-2xl font-black tracking-tight text-gray-900">${escapeHtml(location)}</h2>${restaurants}`;
   }).join('');
 
   return `<!doctype html>
@@ -597,36 +590,67 @@ function renderPublicPage(items, error = null, lastUpdatedAt = null) {
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <title>${escapeHtml(SITE_TITLE)}</title>
-  <style>${publicCss}</style>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { background: radial-gradient(circle at top left, rgba(34,197,94,.15), transparent 32rem), #f3f4f6; }
+    .hero { background: linear-gradient(135deg, rgba(17,24,39,.98), rgba(22,101,52,.92)), #111827; }
+    h1 { font-size: clamp(34px, 8vw, 64px); }
+    .restaurant-header h2 { font-size: clamp(22px, 5vw, 32px); }
+    @media (max-width: 640px) {
+      .mobile-collapsible:not(.expanded) .mobile-extra { display: none; }
+      .mobile-collapsible .restaurant-toggle:not(:disabled)::after { content: '⌄'; display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; border-radius: 999px; background: #dcfce7; color: #166534; font-size: 18px; }
+      .mobile-collapsible.expanded .restaurant-toggle::after { content: '⌃'; }
+      .mobile-collapsible .mobile-toggle-text { display: inline !important; }
+      .mobile-collapsible.expanded .mobile-toggle-text { display: none !important; }
+    }
+  </style>
 </head>
-<body>
-  <main class="page">
-    <section class="hero">
-      <div class="hero-top">
+<body class="min-h-screen text-gray-900 antialiased">
+  <main class="max-w-4xl mx-auto px-4 sm:px-5 py-5">
+
+    <section class="hero rounded-3xl p-6 sm:p-7 text-white shadow-2xl">
+      <div class="flex items-start justify-between gap-4 mb-7">
         <div>
-          <div class="app-pill">🍽️ ${escapeHtml(SITE_TITLE)}</div>
-          <h1>Dnešné obedové menu</h1>
-          <div class="mobile-date-inline"><strong>${escapeHtml(today)}</strong><span>Aktualizované ${escapeHtml(updatedAt)}</span></div>
+          <div class="inline-flex items-center gap-2 px-3 py-2 rounded-full text-sm font-bold border border-white/20 bg-white/10">🍽️ ${escapeHtml(SITE_TITLE)}</div>
+          <h1 class="m-0 mt-3 font-black leading-none tracking-tight">Dnešné obedové menu</h1>
+          <div class="flex gap-2 flex-wrap mt-2 sm:hidden">
+            <strong class="text-sm">${escapeHtml(today)}</strong>
+            <span class="text-white/70 text-xs self-center">Aktualizované ${escapeHtml(updatedAt)}</span>
+          </div>
         </div>
-        <div class="date-card"><strong>${escapeHtml(today)}</strong><span>Aktualizované ${escapeHtml(updatedAt)}</span></div>
+        <div class="hidden sm:block flex-none min-w-[164px] p-4 rounded-2xl bg-white/10 border border-white/15 text-right self-start leading-tight">
+          <strong class="block text-sm">${escapeHtml(today)}</strong>
+          <span class="block mt-1 text-white/70 text-xs">Aktualizované ${escapeHtml(updatedAt)}</span>
+        </div>
       </div>
-      <div class="stats">
-        <div class="stat"><strong>${items.length}</strong><span>položiek menu</span></div>
-        <div class="stat"><strong>${new Set(items.map((item) => item.source_id)).size}</strong><span>zdrojov</span></div>
-        <div class="stat"><strong>${Object.keys(grouped).length}</strong><span>lokalít</span></div>
+      <div class="grid grid-cols-3 gap-2">
+        <div class="p-3 sm:p-4 rounded-2xl bg-white/10 border border-white/15">
+          <strong class="block text-2xl font-black leading-none">${items.length}</strong>
+          <span class="block mt-1.5 text-white/70 text-xs font-semibold">položiek menu</span>
+        </div>
+        <div class="p-3 sm:p-4 rounded-2xl bg-white/10 border border-white/15">
+          <strong class="block text-2xl font-black leading-none">${new Set(items.map((item) => item.source_id)).size}</strong>
+          <span class="block mt-1.5 text-white/70 text-xs font-semibold">zdrojov</span>
+        </div>
+        <div class="p-3 sm:p-4 rounded-2xl bg-white/10 border border-white/15">
+          <strong class="block text-2xl font-black leading-none">${locations.length}</strong>
+          <span class="block mt-1.5 text-white/70 text-xs font-semibold">lokalít</span>
+        </div>
       </div>
     </section>
-    <section class="content">
-      ${error ? `<div class="error-state"><h2>Menu sa nepodarilo načítať</h2><p>${escapeHtml(error)}</p></div>` : ''}
-      ${!error && items.length === 0 ? '<div class="empty-state"><h2>Zatiaľ tu nie je menu</h2><p>V databáze nie sú položky pre dnešný deň.</p></div>' : ''}
+
+    <section class="grid gap-4 mt-5">
+      ${error ? `<div class="border border-gray-200 rounded-3xl bg-white/95 shadow-lg p-6"><h2 class="text-xl font-bold">Menu sa nepodarilo načítať</h2><p class="text-gray-500">${escapeHtml(error)}</p></div>` : ''}
+      ${!error && items.length === 0 ? '<div class="border border-gray-200 rounded-3xl bg-white/95 shadow-lg p-6"><h2 class="text-xl font-bold">Zatiaľ tu nie je menu</h2><p class="text-gray-500">V databáze nie sú položky pre dnešný deň.</p></div>' : ''}
       ${!error ? content : ''}
     </section>
-    <footer class="footer">Powered by n8n · PostgreSQL · Docker · Raspberry Pi homelab</footer>
+
+    <footer class="py-6 text-center text-xs text-gray-400">Powered by n8n · PostgreSQL · Docker · Raspberry Pi homelab</footer>
   </main>
   <script>
     document.querySelectorAll('.restaurant-card.mobile-collapsible .restaurant-toggle').forEach((button) => {
       button.addEventListener('click', () => {
-        if (!window.matchMedia('(max-width: 720px)').matches) return;
+        if (!window.matchMedia('(max-width: 640px)').matches) return;
         const card = button.closest('.restaurant-card');
         const expanded = card.classList.toggle('expanded');
         button.setAttribute('aria-expanded', expanded ? 'true' : 'false');
