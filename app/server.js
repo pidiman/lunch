@@ -546,7 +546,6 @@ function renderPublicPage(items, error = null, lastUpdatedAt = null) {
           <div class="app-pill">🍽️ ${escapeHtml(SITE_TITLE)}</div>
           <h1>Dnešné obedové menu</h1>
           <div class="mobile-date-inline"><strong>${escapeHtml(today)}</strong><span>Aktualizované ${escapeHtml(updatedAt)}</span></div>
-          <p class="hero-subtitle">Prehľad obedov zo všetkých tvojich zdrojov na jednom mieste. Dáta importuje n8n a stránka číta priamo z PostgreSQL.</p>
         </div>
         <div class="date-card"><strong>${escapeHtml(today)}</strong><span>Aktualizované ${escapeHtml(updatedAt)}</span></div>
       </div>
