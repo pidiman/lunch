@@ -194,6 +194,7 @@ http.createServer = function createServerWithEnhancements(listener) {
         }
 
         if (req.method === 'GET' && url.pathname === '/') {
+          body = body.replace(/\s*<p class="hero-subtitle">Prehľad obedov zo všetkých tvojich zdrojov na jednom mieste\. Dáta importuje n8n a stránka číta priamo z PostgreSQL\.<\/p>/, '');
           if (body.includes('</body>') && !body.includes('public-location-order-js')) {
             body = body.replace('</body>', `  ${publicLocationOrderJs}\n</body>`);
           }
