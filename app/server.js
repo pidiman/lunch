@@ -562,9 +562,8 @@ function renderPublicPage(items, error = null, lastUpdatedAt = null) {
   const updatedAt = formatTime(lastUpdatedAt);
   const grouped = groupByLocationAndSource(items);
 
-  const locations = LOCATION_OPTIONS
-    .concat(Object.keys(grouped).filter((location) => !LOCATION_OPTIONS.includes(location)))
-    .filter((value, index, array) => array.indexOf(value) === index && grouped[value]);
+  // Order comes from the DB query (already sorted by location weight), preserve insertion order
+  const locations = Object.keys(grouped);
 
   const content = locations.map((location) => {
     const restaurants = Object.entries(grouped[location]).map(([sourceName, rows]) => {
