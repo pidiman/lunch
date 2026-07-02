@@ -1,4 +1,5 @@
 const http = require('http');
+const net = require('net');
 const fs = require('fs');
 const path = require('path');
 const { Pool } = require('pg');
@@ -11,6 +12,10 @@ const PORT = Number(process.env.PORT || 3000);
 const SITE_TITLE = process.env.SITE_TITLE || 'Obedové menu';
 const IS_PRODUCTION = process.env.NODE_ENV === 'production';
 const SESSION_TTL_DAYS = 30;
+const RESET_CODE_TTL_MINUTES = 15;
+const SMTP_HOST = process.env.SMTP_HOST || 'smtp-relay';
+const SMTP_PORT = Number(process.env.SMTP_PORT || 25);
+const SMTP_FROM = process.env.SMTP_FROM || 'obedove-menu@localhost';
 const LOCATION_OPTIONS = ['Praca', 'Karlovka', 'Stupava'];
 const CATEGORIES = ['soup', 'main', 'special', 'pizza', 'side', 'dessert', 'drink', 'unknown'];
 
@@ -160,6 +165,16 @@ async function ensureSchema() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS public.lunch_password_resets (
+      id BIGSERIAL PRIMARY KEY,
+      user_id BIGINT NOT NULL REFERENCES public.lunch_users(id) ON DELETE CASCADE,
+      code_hash TEXT NOT NULL,
+      expires_at TIMESTAMPTZ NOT NULL,
+      used_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
 }
 
 async function ensureSchemaWithRetry() {
@@ -238,11 +253,6 @@ function normalizeEmail(value) {
   return clean(value).toLowerCase();
 }
 
-async function countUsers() {
-  const result = await pool.query(`SELECT COUNT(*)::int AS n FROM public.lunch_users`);
-  return result.rows[0].n;
-}
-
 async function registerUser(form) {
   const email = normalizeEmail(form.email);
   const password = String(form.password || '');
@@ -309,6 +319,114 @@ async function deleteUser(form, currentUser) {
   if (!Number.isInteger(id)) throw new Error('Neplatné ID používateľa.');
   if (id === Number(currentUser.id)) throw new Error('Nemôžeš zmazať vlastný účet.');
   await pool.query(`DELETE FROM public.lunch_users WHERE id = $1`, [id]);
+}
+
+// Minimal SMTP client for a trusted local relay (no auth, no TLS)
+function sendMail(to, subject, text) {
+  return new Promise((resolve, reject) => {
+    const socket = net.createConnection(SMTP_PORT, SMTP_HOST);
+    let buffer = '';
+    let step = 0;
+    let settled = false;
+
+    const fail = (err) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      reject(err);
+    };
+
+    socket.setTimeout(10000, () => fail(new Error('SMTP timeout')));
+    socket.on('error', fail);
+
+    const encodedSubject = `=?UTF-8?B?${Buffer.from(subject, 'utf8').toString('base64')}?=`;
+    const message = [
+      `From: ${SITE_TITLE.replace(/[\r\n"]/g, '')} <${SMTP_FROM}>`,
+      `To: <${to}>`,
+      `Subject: ${encodedSubject}`,
+      `Date: ${new Date().toUTCString()}`,
+      `Message-ID: <${crypto.randomUUID()}@obedove-menu>`,
+      'MIME-Version: 1.0',
+      'Content-Type: text/plain; charset=utf-8',
+      'Content-Transfer-Encoding: 8bit',
+      '',
+      text,
+    ].join('\r\n').replace(/\r?\n\./g, '\r\n..');
+
+    const steps = [
+      { expect: 220, send: `EHLO obedove-menu` },
+      { expect: 250, send: `MAIL FROM:<${SMTP_FROM}>` },
+      { expect: 250, send: `RCPT TO:<${to}>` },
+      { expect: 250, send: 'DATA' },
+      { expect: 354, send: `${message}\r\n.` },
+      { expect: 250, send: 'QUIT' },
+      { expect: 221, send: null },
+    ];
+
+    socket.on('data', (chunk) => {
+      buffer += chunk.toString('utf8');
+      // A reply is complete when its last line is "NNN<space>..."
+      const lines = buffer.split(/\r?\n/).filter(Boolean);
+      const last = lines[lines.length - 1];
+      if (!last || !/^\d{3} /.test(last)) return;
+      const code = Number(last.slice(0, 3));
+      buffer = '';
+
+      const current = steps[step];
+      if (code !== current.expect) return fail(new Error(`SMTP odpoveď ${code}: ${last.slice(4)}`));
+      if (current.send === null) {
+        settled = true;
+        socket.end();
+        return resolve();
+      }
+      socket.write(current.send + '\r\n');
+      step += 1;
+    });
+  });
+}
+
+async function requestPasswordReset(form) {
+  const email = normalizeEmail(form.email);
+  if (!EMAIL_RE.test(email)) throw new Error('Zadaj platnú e-mailovú adresu.');
+  const result = await pool.query(`SELECT id FROM public.lunch_users WHERE email = $1`, [email]);
+  const user = result.rows[0];
+  if (!user) return; // same response whether or not the account exists
+
+  const code = String(crypto.randomInt(0, 1000000)).padStart(6, '0');
+  await pool.query(`DELETE FROM public.lunch_password_resets WHERE user_id = $1`, [user.id]);
+  await pool.query(`
+    INSERT INTO public.lunch_password_resets (user_id, code_hash, expires_at)
+    VALUES ($1, $2, NOW() + make_interval(mins => $3))
+  `, [user.id, hashSessionToken(code), RESET_CODE_TTL_MINUTES]);
+
+  await sendMail(
+    email,
+    `Obnovenie hesla · ${SITE_TITLE}`,
+    `Ahoj,\r\n\r\ntvoj jednorazový kód na obnovenie hesla je: ${code}\r\n\r\nKód platí ${RESET_CODE_TTL_MINUTES} minút a dá sa použiť iba raz.\r\nAk si o obnovenie hesla nežiadal(a), tento e-mail ignoruj.\r\n\r\n${SITE_TITLE}`
+  );
+}
+
+async function confirmPasswordReset(form) {
+  const email = normalizeEmail(form.email);
+  const code = clean(form.code);
+  const password = String(form.password || '');
+  if (!/^\d{6}$/.test(code)) throw new Error('Kód má 6 číslic.');
+  if (password.length < 8) throw new Error('Heslo musí mať aspoň 8 znakov.');
+  if (password !== String(form.password_confirm || '')) throw new Error('Heslá sa nezhodujú.');
+
+  const result = await pool.query(`
+    SELECT r.id, r.user_id
+    FROM public.lunch_password_resets r
+    JOIN public.lunch_users u ON u.id = r.user_id
+    WHERE u.email = $1 AND r.code_hash = $2 AND r.expires_at > NOW() AND r.used_at IS NULL
+  `, [email, hashSessionToken(code)]);
+  const reset = result.rows[0];
+  if (!reset) throw new Error('Neplatný alebo expirovaný kód.');
+
+  const passwordHash = await hashPassword(password);
+  await pool.query(`UPDATE public.lunch_password_resets SET used_at = NOW() WHERE id = $1`, [reset.id]);
+  await pool.query(`UPDATE public.lunch_users SET password_hash = $2, updated_at = NOW() WHERE id = $1`, [reset.user_id, passwordHash]);
+  await pool.query(`DELETE FROM public.lunch_sessions WHERE user_id = $1`, [reset.user_id]);
 }
 
 function sendHtml(res, status, body, headers = {}) {
@@ -739,6 +857,7 @@ function renderPublicPage(items, error = null, lastUpdatedAt = null) {
             <strong class="block text-sm">${escapeHtml(today)}</strong>
             <span class="block mt-1 text-white/70 text-xs">Aktualizované ${escapeHtml(updatedAt)}</span>
           </div>
+          <button id="login-open" type="button" class="inline-flex items-center h-11 px-4 rounded-2xl bg-white/10 border border-white/15 text-sm font-bold cursor-pointer hover:bg-white/20 whitespace-nowrap">Prihlásiť sa</button>
           <button id="theme-toggle" type="button" aria-label="Prepnúť tmavý režim" class="grid place-items-center w-11 h-11 rounded-2xl bg-white/10 border border-white/15 text-xl cursor-pointer hover:bg-white/20">🌙</button>
         </div>
       </div>
@@ -766,6 +885,33 @@ function renderPublicPage(items, error = null, lastUpdatedAt = null) {
 
     <footer class="py-6 text-center text-xs text-gray-400 dark:text-gray-500">Powered by n8n · PostgreSQL · Docker · Raspberry Pi homelab</footer>
   </main>
+
+  <div id="login-modal" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/60 p-4">
+    <div class="w-full max-w-md bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-3xl shadow-2xl p-6 relative">
+      <button id="login-close" type="button" aria-label="Zavrieť" class="absolute top-4 right-4 grid place-items-center w-9 h-9 rounded-full bg-gray-100 dark:bg-gray-700 text-gray-500 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-600 cursor-pointer border-0 text-base">✕</button>
+
+      <div class="flex gap-2 mb-5">
+        <button type="button" class="auth-pane-btn px-4 py-2 rounded-full text-sm font-bold border cursor-pointer" data-pane="login">Prihlásenie</button>
+        <button type="button" class="auth-pane-btn px-4 py-2 rounded-full text-sm font-bold border cursor-pointer" data-pane="register">Registrácia</button>
+      </div>
+
+      <form id="pane-login" method="post" action="/admin/login" class="grid gap-3">
+        <label class="block"><span class="block text-xs font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wide">E-mail</span><input type="email" name="email" required autocomplete="username" class="mt-1 w-full border border-gray-300 dark:border-gray-600 rounded-xl px-4 py-3 text-base bg-white dark:bg-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-green-600"></label>
+        <label class="block"><span class="block text-xs font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wide">Heslo</span><input type="password" name="password" required autocomplete="current-password" class="mt-1 w-full border border-gray-300 dark:border-gray-600 rounded-xl px-4 py-3 text-base bg-white dark:bg-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-green-600"></label>
+        <button type="submit" class="mt-1 w-full px-4 py-3 bg-gray-900 dark:bg-gray-700 hover:bg-gray-800 dark:hover:bg-gray-600 text-white font-black rounded-xl cursor-pointer border-0">Prihlásiť</button>
+        <a href="/admin?view=reset" class="text-sm font-bold text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200 no-underline justify-self-start">Zabudnuté heslo?</a>
+      </form>
+
+      <form id="pane-register" method="post" action="/admin/register" class="hidden grid gap-3">
+        <p class="m-0 text-sm text-gray-500 dark:text-gray-400">Nový účet musí schváliť admin. Úplne prvý zaregistrovaný účet sa stáva adminom.</p>
+        <label class="block"><span class="block text-xs font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wide">E-mail</span><input type="email" name="email" required autocomplete="username" class="mt-1 w-full border border-gray-300 dark:border-gray-600 rounded-xl px-4 py-3 text-base bg-white dark:bg-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-green-600"></label>
+        <label class="block"><span class="block text-xs font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wide">Heslo (min. 8 znakov)</span><input type="password" name="password" required minlength="8" autocomplete="new-password" class="mt-1 w-full border border-gray-300 dark:border-gray-600 rounded-xl px-4 py-3 text-base bg-white dark:bg-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-green-600"></label>
+        <label class="block"><span class="block text-xs font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wide">Heslo znova</span><input type="password" name="password_confirm" required minlength="8" autocomplete="new-password" class="mt-1 w-full border border-gray-300 dark:border-gray-600 rounded-xl px-4 py-3 text-base bg-white dark:bg-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-green-600"></label>
+        <button type="submit" class="mt-1 w-full px-4 py-3 bg-green-600 hover:bg-green-700 text-white font-black rounded-xl cursor-pointer border-0">Registrovať</button>
+      </form>
+    </div>
+  </div>
+
   <script>
     document.querySelectorAll('.restaurant-card.mobile-collapsible .restaurant-toggle').forEach((button) => {
       button.addEventListener('click', () => {
@@ -785,14 +931,80 @@ function renderPublicPage(items, error = null, lastUpdatedAt = null) {
       localStorage.setItem('lunch_theme', dark ? 'dark' : 'light');
       syncThemeIcon();
     });
+
+    const loginModal = document.getElementById('login-modal');
+    function setModalOpen(open) {
+      loginModal.classList.toggle('hidden', !open);
+      loginModal.classList.toggle('flex', open);
+      if (open) loginModal.querySelector('#pane-login input[name="email"]').focus();
+    }
+    function setPane(name) {
+      document.getElementById('pane-login').classList.toggle('hidden', name !== 'login');
+      document.getElementById('pane-register').classList.toggle('hidden', name !== 'register');
+      document.querySelectorAll('.auth-pane-btn').forEach((btn) => {
+        const on = btn.dataset.pane === name;
+        btn.className = 'auth-pane-btn px-4 py-2 rounded-full text-sm font-bold border cursor-pointer ' +
+          (on ? 'bg-gray-900 text-white border-gray-900 dark:bg-gray-100 dark:text-gray-900 dark:border-gray-100'
+              : 'bg-white text-gray-500 border-gray-200 dark:bg-gray-800 dark:text-gray-400 dark:border-gray-600');
+      });
+    }
+    setPane('login');
+    document.getElementById('login-open').addEventListener('click', () => setModalOpen(true));
+    document.getElementById('login-close').addEventListener('click', () => setModalOpen(false));
+    loginModal.addEventListener('click', (event) => { if (event.target === loginModal) setModalOpen(false); });
+    document.addEventListener('keydown', (event) => { if (event.key === 'Escape') setModalOpen(false); });
+    document.querySelectorAll('.auth-pane-btn').forEach((btn) => btn.addEventListener('click', () => setPane(btn.dataset.pane)));
   </script>
 </body>
 </html>`;
 }
 
-function renderAuthPage({ hasUsers = true, error = '', notice = '' } = {}) {
+function renderAuthPage({ view = 'login', error = '', notice = '' } = {}) {
   const authInput = 'mt-1 w-full border border-gray-300 rounded-xl px-4 py-3 text-base bg-white focus:outline-none focus:ring-2 focus:ring-gray-900';
   const authLabel = 'block text-xs font-bold text-gray-500 uppercase tracking-wide';
+
+  const loginView = `
+    <div class="bg-white border border-gray-200 rounded-3xl shadow-lg p-6">
+      <h1 class="m-0 text-3xl font-black tracking-tight">Admin menu</h1>
+      <p class="mt-1 mb-5 text-sm text-gray-500">Prihlás sa e-mailom a heslom.</p>
+
+      <form method="post" action="/admin/login" class="grid gap-3">
+        <label class="block"><span class="${authLabel}">E-mail</span><input type="email" name="email" required autocomplete="username" autofocus class="${authInput}"></label>
+        <label class="block"><span class="${authLabel}">Heslo</span><input type="password" name="password" required autocomplete="current-password" class="${authInput}"></label>
+        <button type="submit" class="mt-1 w-full px-4 py-3 bg-gray-900 hover:bg-gray-800 text-white font-black rounded-xl cursor-pointer border-0">Prihlásiť</button>
+      </form>
+
+      <div class="flex justify-between mt-4 text-sm">
+        <a href="/admin?view=reset" class="font-bold text-gray-500 hover:text-gray-900 no-underline">Zabudnuté heslo?</a>
+        <a href="/" class="font-bold text-gray-500 hover:text-gray-900 no-underline">← Späť na menu</a>
+      </div>
+    </div>`;
+
+  const resetView = `
+    <div class="bg-white border border-gray-200 rounded-3xl shadow-lg p-6">
+      <h1 class="m-0 text-2xl font-black tracking-tight">Obnovenie hesla</h1>
+      <p class="mt-1 mb-5 text-sm text-gray-500">Pošleme ti jednorazový kód platný ${RESET_CODE_TTL_MINUTES} minút.</p>
+
+      <form method="post" action="/admin/reset/request" class="grid gap-3">
+        <label class="block"><span class="${authLabel}">E-mail</span><input type="email" name="email" required autocomplete="username" autofocus class="${authInput}"></label>
+        <button type="submit" class="mt-1 w-full px-4 py-3 bg-gray-900 hover:bg-gray-800 text-white font-black rounded-xl cursor-pointer border-0">Poslať kód</button>
+      </form>
+    </div>
+
+    <div class="bg-white border border-gray-200 rounded-3xl shadow-lg p-6 mt-4">
+      <h2 class="m-0 text-lg font-black tracking-tight">Už máš kód?</h2>
+      <p class="mt-1 mb-4 text-sm text-gray-500">Zadaj kód z e-mailu a nové heslo.</p>
+      <form method="post" action="/admin/reset/confirm" class="grid gap-3">
+        <label class="block"><span class="${authLabel}">E-mail</span><input type="email" name="email" required autocomplete="username" class="${authInput}"></label>
+        <label class="block"><span class="${authLabel}">Kód z e-mailu</span><input name="code" required inputmode="numeric" pattern="[0-9]{6}" maxlength="6" placeholder="123456" class="${authInput}"></label>
+        <label class="block"><span class="${authLabel}">Nové heslo (min. 8 znakov)</span><input type="password" name="password" required minlength="8" autocomplete="new-password" class="${authInput}"></label>
+        <label class="block"><span class="${authLabel}">Nové heslo znova</span><input type="password" name="password_confirm" required minlength="8" autocomplete="new-password" class="${authInput}"></label>
+        <button type="submit" class="mt-1 w-full px-4 py-3 bg-green-600 hover:bg-green-700 text-white font-black rounded-xl cursor-pointer border-0">Zmeniť heslo</button>
+      </form>
+      <div class="mt-4 text-sm">
+        <a href="/admin" class="font-bold text-gray-500 hover:text-gray-900 no-underline">← Späť na prihlásenie</a>
+      </div>
+    </div>`;
 
   return `<!doctype html>
 <html lang="sk">
@@ -805,32 +1017,9 @@ function renderAuthPage({ hasUsers = true, error = '', notice = '' } = {}) {
 </head>
 <body class="min-h-screen grid place-items-center bg-gray-100 text-gray-900 antialiased px-3 py-8">
   <main class="w-full max-w-md">
-    <div class="bg-white border border-gray-200 rounded-3xl shadow-lg p-6">
-      <h1 class="m-0 text-3xl font-black tracking-tight">Admin menu</h1>
-      <p class="mt-1 mb-5 text-sm text-gray-500">Prihlás sa e-mailom a heslom.</p>
-
-      ${error ? `<div class="mb-4 px-4 py-3 bg-red-50 border border-red-200 text-red-800 font-semibold rounded-xl text-sm">${escapeHtml(error)}</div>` : ''}
-      ${notice ? `<div class="mb-4 px-4 py-3 bg-green-50 border border-green-200 text-green-800 font-semibold rounded-xl text-sm">${escapeHtml(notice)}</div>` : ''}
-
-      <form method="post" action="/admin/login" class="grid gap-3">
-        <label class="block"><span class="${authLabel}">E-mail</span><input type="email" name="email" required autocomplete="username" autofocus class="${authInput}"></label>
-        <label class="block"><span class="${authLabel}">Heslo</span><input type="password" name="password" required autocomplete="current-password" class="${authInput}"></label>
-        <button type="submit" class="mt-1 w-full px-4 py-3 bg-gray-900 hover:bg-gray-800 text-white font-black rounded-xl cursor-pointer border-0">Prihlásiť</button>
-      </form>
-    </div>
-
-    <div class="bg-white border border-gray-200 rounded-3xl shadow-lg p-6 mt-4">
-      <h2 class="m-0 text-lg font-black tracking-tight">Registrácia</h2>
-      <p class="mt-1 mb-4 text-sm text-gray-500">${hasUsers
-        ? 'Nový účet získa rolu <strong>user</strong> a musí ho schváliť admin.'
-        : 'Zatiaľ neexistuje žiadny účet — <strong>prvý zaregistrovaný používateľ sa stane adminom</strong>.'}</p>
-      <form method="post" action="/admin/register" class="grid gap-3">
-        <label class="block"><span class="${authLabel}">E-mail</span><input type="email" name="email" required autocomplete="username" class="${authInput}"></label>
-        <label class="block"><span class="${authLabel}">Heslo (min. 8 znakov)</span><input type="password" name="password" required minlength="8" autocomplete="new-password" class="${authInput}"></label>
-        <label class="block"><span class="${authLabel}">Heslo znova</span><input type="password" name="password_confirm" required minlength="8" autocomplete="new-password" class="${authInput}"></label>
-        <button type="submit" class="mt-1 w-full px-4 py-3 bg-green-600 hover:bg-green-700 text-white font-black rounded-xl cursor-pointer border-0">Registrovať</button>
-      </form>
-    </div>
+    ${error ? `<div class="mb-4 px-4 py-3 bg-red-50 border border-red-200 text-red-800 font-semibold rounded-xl text-sm">${escapeHtml(error)}</div>` : ''}
+    ${notice ? `<div class="mb-4 px-4 py-3 bg-green-50 border border-green-200 text-green-800 font-semibold rounded-xl text-sm">${escapeHtml(notice)}</div>` : ''}
+    ${view === 'reset' ? resetView : loginView}
   </main>
 </body>
 </html>`;
@@ -838,7 +1027,9 @@ function renderAuthPage({ hasUsers = true, error = '', notice = '' } = {}) {
 
 function renderAdminPage({ items, sources, locations, users = [], currentUser, menuDate, notice = '', error = '', activeTab = 'polozky' }) {
   const isAdminUser = currentUser.role === 'admin';
-  const tabs = isAdminUser ? ['polozky', 'restauracie', 'lokality', 'pouzivatelia'] : ['polozky', 'restauracie', 'lokality'];
+  // The 'user' role can only adjust location display weights
+  const tabs = isAdminUser ? ['polozky', 'restauracie', 'lokality', 'pouzivatelia'] : ['lokality'];
+  const tabLabels = { polozky: 'Položky', restauracie: 'Reštaurácie', lokality: 'Lokality', pouzivatelia: 'Používatelia' };
   const tw = {
     input: 'mt-1 w-full border border-gray-300 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-gray-900',
     label: 'block text-xs font-bold text-gray-500 uppercase tracking-wide',
@@ -893,13 +1084,13 @@ function renderAdminPage({ items, sources, locations, users = [], currentUser, m
           <button type="submit" class="${tw.btnGreen}">Uložiť</button>
         </form>
       </td>
-      <td class="${tw.td}">
+      ${isAdminUser ? `<td class="${tw.td}">
         <form method="post" action="/admin/locations/delete" onsubmit="return confirm('Naozaj zmazať lokalitu ${escapeHtml(loc.name)}?')">
           <input type="hidden" name="_tab" value="lokality">
           <input type="hidden" name="name" value="${escapeHtml(loc.name)}">
           <button type="submit" class="${tw.btnRed}">Zmazať</button>
         </form>
-      </td>
+      </td>` : ''}
     </tr>
   `).join('');
 
@@ -996,7 +1187,7 @@ function renderAdminPage({ items, sources, locations, users = [], currentUser, m
     <div class="flex justify-between items-start gap-4 mb-6 flex-wrap">
       <div>
         <h1 class="text-4xl font-black tracking-tight leading-none">Admin menu</h1>
-        <p class="text-gray-500 mt-1 text-sm">Správa položiek, reštaurácií a lokalít.</p>
+        <p class="text-gray-500 mt-1 text-sm">${isAdminUser ? 'Správa položiek, reštaurácií a lokalít.' : 'Úprava poradia lokalít na hlavnej stránke.'}</p>
       </div>
       <div class="flex items-center gap-2 flex-wrap">
         <span class="px-3 py-2 bg-white border border-gray-200 rounded-full text-sm text-gray-600">${escapeHtml(currentUser.email)} <span class="ml-1 px-2 py-0.5 rounded-full text-xs font-bold ${isAdminUser ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-600'}">${isAdminUser ? 'admin' : 'user'}</span></span>
@@ -1008,20 +1199,20 @@ function renderAdminPage({ items, sources, locations, users = [], currentUser, m
     ${notice ? `<div class="mb-4 px-4 py-3 bg-green-50 border border-green-200 text-green-800 font-semibold rounded-xl text-sm">${escapeHtml(notice)}</div>` : ''}
     ${error ? `<div class="mb-4 px-4 py-3 bg-red-50 border border-red-200 text-red-800 font-semibold rounded-xl text-sm">${escapeHtml(error)}</div>` : ''}
 
+    ${isAdminUser ? `
     <div class="bg-white border border-gray-200 rounded-2xl shadow-sm p-4 mb-4">
       <form class="flex items-end gap-3 flex-wrap" method="get" action="/admin">
         <label class="block"><span class="${tw.label}">Dátum</span><input type="date" name="date" value="${escapeHtml(menuDate)}" class="${tw.input}"></label>
         <button type="submit" class="${tw.btnGray}">Filtrovať</button>
       </form>
     </div>
+    ` : ''}
 
     <div class="flex gap-2 mb-4 flex-wrap">
-      <button class="tab-btn px-5 py-2 rounded-full text-sm font-bold border cursor-pointer" data-tab="polozky">Položky</button>
-      <button class="tab-btn px-5 py-2 rounded-full text-sm font-bold border cursor-pointer" data-tab="restauracie">Reštaurácie</button>
-      <button class="tab-btn px-5 py-2 rounded-full text-sm font-bold border cursor-pointer" data-tab="lokality">Lokality</button>
-      ${isAdminUser ? '<button class="tab-btn px-5 py-2 rounded-full text-sm font-bold border cursor-pointer" data-tab="pouzivatelia">Používatelia</button>' : ''}
+      ${tabs.map((t) => `<button class="tab-btn px-5 py-2 rounded-full text-sm font-bold border cursor-pointer" data-tab="${t}">${tabLabels[t]}</button>`).join('')}
     </div>
 
+    ${isAdminUser ? `
     <!-- TAB: Položky -->
     <div id="tab-polozky" class="tab-panel">
       <div class="bg-white border border-gray-200 rounded-2xl shadow-sm p-5 mb-4">
@@ -1093,6 +1284,8 @@ function renderAdminPage({ items, sources, locations, users = [], currentUser, m
       </div>
     </div>
 
+    ` : ''}
+
     <!-- TAB: Lokality -->
     <div id="tab-lokality" class="tab-panel">
       <div class="bg-white border border-gray-200 rounded-2xl shadow-sm overflow-hidden">
@@ -1106,14 +1299,15 @@ function renderAdminPage({ items, sources, locations, users = [], currentUser, m
               <tr>
                 <th class="${tw.th}">Lokalita</th>
                 <th class="${tw.th}">Váha</th>
-                <th class="${tw.th}">Akcie</th>
+                ${isAdminUser ? `<th class="${tw.th}">Akcie</th>` : ''}
               </tr>
             </thead>
             <tbody class="divide-y divide-gray-100 bg-white">
-              ${locationTableRows || `<tr><td colspan="3" class="px-5 py-6 text-sm text-gray-400">Žiadne lokality.</td></tr>`}
+              ${locationTableRows || `<tr><td colspan="${isAdminUser ? 3 : 2}" class="px-5 py-6 text-sm text-gray-400">Žiadne lokality.</td></tr>`}
             </tbody>
           </table>
         </div>
+        ${isAdminUser ? `
         <div class="px-5 py-4 border-t border-gray-100 bg-gray-50">
           <form class="flex items-end gap-3 flex-wrap" method="post" action="/admin/locations/create">
             <input type="hidden" name="_tab" value="lokality">
@@ -1122,6 +1316,7 @@ function renderAdminPage({ items, sources, locations, users = [], currentUser, m
             <div class="flex items-end"><button type="submit" class="${tw.btnGreen}">Pridať lokalitu</button></div>
           </form>
         </div>
+        ` : ''}
       </div>
     </div>
 
@@ -1158,7 +1353,7 @@ function renderAdminPage({ items, sources, locations, users = [], currentUser, m
     function toggleRow(id) { document.getElementById(id).classList.toggle('hidden'); }
     const TABS = ${JSON.stringify(tabs)};
     function activateTab(name) {
-      if (!TABS.includes(name)) name = 'polozky';
+      if (!TABS.includes(name)) name = TABS[0];
       TABS.forEach((t) => {
         document.getElementById('tab-' + t).classList.toggle('active', t === name);
       });
@@ -1180,7 +1375,7 @@ async function adminGet(req, res, url) {
   const user = await getSessionUser(req);
   if (!user) {
     return sendHtml(res, 401, renderAuthPage({
-      hasUsers: (await countUsers()) > 0,
+      view: url.searchParams.get('view') || 'login',
       error: url.searchParams.get('error') || '',
       notice: url.searchParams.get('notice') || '',
     }));
@@ -1196,7 +1391,7 @@ async function adminGet(req, res, url) {
     menuDate,
     notice: url.searchParams.get('notice') || '',
     error: url.searchParams.get('error') || '',
-    activeTab: url.searchParams.get('tab') || 'polozky',
+    activeTab: url.searchParams.get('tab') || (user.role === 'admin' ? 'polozky' : 'lokality'),
   }));
 }
 
@@ -1226,6 +1421,28 @@ async function adminPost(req, res, url) {
     }
   }
 
+  if (url.pathname === '/admin/reset/request') {
+    const form = await readForm(req);
+    try {
+      await requestPasswordReset(form);
+      return redirect(res, `/admin?view=reset&notice=${encodeURIComponent('Ak účet existuje, poslali sme kód na zadaný e-mail.')}`);
+    } catch (err) {
+      console.error('Password reset request failed:', err);
+      const message = err.message.startsWith('Zadaj') ? err.message : 'Kód sa nepodarilo odoslať. Skús to neskôr.';
+      return redirect(res, `/admin?view=reset&error=${encodeURIComponent(message)}`);
+    }
+  }
+
+  if (url.pathname === '/admin/reset/confirm') {
+    const form = await readForm(req);
+    try {
+      await confirmPasswordReset(form);
+      return redirect(res, `/admin?notice=${encodeURIComponent('Heslo bolo zmenené. Prihlás sa novým heslom.')}`);
+    } catch (err) {
+      return redirect(res, `/admin?view=reset&error=${encodeURIComponent(err.message)}`);
+    }
+  }
+
   const user = await getSessionUser(req);
   if (!user) return redirect(res, `/admin?error=${encodeURIComponent('Neautorizovaný prístup')}`);
 
@@ -1233,8 +1450,12 @@ async function adminPost(req, res, url) {
   const menuDate = clean(form.menu_date, todayIso());
   const tab = clean(form._tab, 'polozky');
   try {
+    // The 'user' role may only adjust location weights
+    if (user.role !== 'admin' && url.pathname !== '/admin/locations/update') {
+      throw new Error('Na túto akciu potrebuješ rolu admin.');
+    }
+
     if (url.pathname === '/admin/users/approve' || url.pathname === '/admin/users/delete') {
-      if (user.role !== 'admin') throw new Error('Len admin môže spravovať používateľov.');
       if (url.pathname === '/admin/users/approve') await approveUser(form);
       else await deleteUser(form, user);
     }

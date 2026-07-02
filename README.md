@@ -61,9 +61,25 @@ http://192.168.1.50:8094
 
 Admin sekcia (`/admin`) používa účty s e-mailom a heslom (bez `ADMIN_TOKEN`):
 
+- `/admin` zobrazuje iba prihlásenie. Registrácia je na hlavnej stránke cez tlačidlo „Prihlásiť sa" → tab „Registrácia".
 - Prvý zaregistrovaný používateľ automaticky získa rolu **admin**.
 - Ďalší registrovaní používatelia dostanú rolu **user** a musia počkať na schválenie adminom (tab „Používatelia").
+- Rola **user** môže meniť iba váhu (poradie) lokalít. Všetko ostatné je len pre admina.
 - Session platí 30 dní, odhlásenie je cez „Odhlásiť".
+
+### Zabudnuté heslo
+
+Na `/admin` je odkaz „Zabudnuté heslo?" — používateľ zadá e-mail a dostane 6-miestny jednorazový kód platný 15 minút.
+
+Kódy sa posielajú cez lokálny SMTP relay kontajner (`smtp-relay`) na tom istom RPI. V `.env` nastav:
+
+```env
+SMTP_HOST=smtp-relay
+SMTP_PORT=25
+SMTP_FROM=obedove-menu@tvoja-domena.sk
+```
+
+Kontajner `obedove-menu` musí mať sieťový prístup k `smtp-relay` — buď pripoj `smtp-relay` do siete `lunch-internal`, alebo nastav `SMTP_HOST` na IP hosta (ak má relay publikovaný port 25).
 
 ## Healthcheck
 
