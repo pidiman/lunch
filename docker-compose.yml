@@ -23,6 +23,9 @@ services:
       - "${WEB_BIND_IP:-0.0.0.0}:${WEB_PORT:-8094}:3000"
     networks:
       - lunch-internal
+      # db-shared is the RPI-wide external network where shared services
+      # (smtp-relay, ...) live; needed so the app can resolve smtp-relay
+      - db-shared
     depends_on:
       obedove-menu-db:
         condition: service_healthy
