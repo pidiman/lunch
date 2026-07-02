@@ -4,7 +4,15 @@
   "private": true,
   "description": "Jednoduchá landing page pre obedové menu z PostgreSQL",
   "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "build:css": "tailwindcss -i tailwind.input.css -o tailwind.css --minify"
+  },
   "dependencies": {
     "pg": "^8.12.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/cli": "^4.1.0",
+    "tailwindcss": "^4.1.0"
   }
 }

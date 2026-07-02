@@ -1,20 +1,38 @@
 const http = require('http');
-const { Client } = require('pg');
+const fs = require('fs');
+const path = require('path');
+const { Pool } = require('pg');
 const crypto = require('crypto');
 
 const PORT = Number(process.env.PORT || 3000);
 const SITE_TITLE = process.env.SITE_TITLE || 'Obedové menu';
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || '';
+const IS_PRODUCTION = process.env.NODE_ENV === 'production';
 const LOCATION_OPTIONS = ['Praca', 'Karlovka', 'Stupava'];
 const CATEGORIES = ['soup', 'main', 'special', 'pizza', 'side', 'dessert', 'drink', 'unknown'];
 
-const dbConfig = {
+const pool = new Pool({
   host: process.env.DB_HOST || 'obedove-menu-db',
   port: Number(process.env.DB_PORT || 5432),
   database: process.env.DB_NAME || 'obedove_menu',
   user: process.env.DB_USER || 'obedove_menu_user',
   password: process.env.DB_PASSWORD || '',
-};
+  max: 5,
+});
+
+pool.on('error', (err) => console.error('pg pool error:', err.message));
+
+function readStaticAsset(fileName) {
+  try {
+    return fs.readFileSync(path.join(__dirname, fileName), 'utf8');
+  } catch {
+    console.warn(`Statický súbor ${fileName} sa nepodarilo načítať.`);
+    return '';
+  }
+}
+
+const faviconSvg = readStaticAsset('favicon.svg');
+const tailwindCss = readStaticAsset('tailwind.css');
 
 function escapeHtml(value) {
   return String(value ?? '')
@@ -102,16 +120,12 @@ function formatDateSk(value = new Date()) {
   }).format(value);
 }
 
-function newClient() {
-  return new Client(dbConfig);
-}
-
-async function ensureSchema(client) {
-  await client.query(`ALTER TABLE public.lunch_sources ADD COLUMN IF NOT EXISTS source_location TEXT NOT NULL DEFAULT 'Praca'`);
-  await client.query(`UPDATE public.lunch_sources SET source_location = 'Stupava' WHERE source_id = 'belavery' AND (source_location IS NULL OR source_location = 'Praca')`);
-  await client.query(`UPDATE public.lunch_sources SET source_location = 'Karlovka' WHERE source_id = 'amelia' AND (source_location IS NULL OR source_location = 'Praca')`);
-  await client.query(`UPDATE public.lunch_sources SET source_location = 'Praca' WHERE source_id = 'zark' AND (source_location IS NULL OR source_location = '')`);
-  await client.query(`
+async function ensureSchema() {
+  await pool.query(`ALTER TABLE public.lunch_sources ADD COLUMN IF NOT EXISTS source_location TEXT NOT NULL DEFAULT 'Praca'`);
+  await pool.query(`UPDATE public.lunch_sources SET source_location = 'Stupava' WHERE source_id = 'belavery' AND (source_location IS NULL OR source_location = 'Praca')`);
+  await pool.query(`UPDATE public.lunch_sources SET source_location = 'Karlovka' WHERE source_id = 'amelia' AND (source_location IS NULL OR source_location = 'Praca')`);
+  await pool.query(`UPDATE public.lunch_sources SET source_location = 'Praca' WHERE source_id = 'zark' AND (source_location IS NULL OR source_location = '')`);
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS public.lunch_locations (
       name TEXT PRIMARY KEY,
       weight INTEGER NOT NULL DEFAULT 100,
@@ -119,11 +133,23 @@ async function ensureSchema(client) {
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `);
-  await client.query(`
+  await pool.query(`
     INSERT INTO public.lunch_locations (name, weight) VALUES
       ('Praca', 10), ('Karlovka', 20), ('Stupava', 30)
     ON CONFLICT (name) DO NOTHING
   `);
+}
+
+async function ensureSchemaWithRetry() {
+  for (;;) {
+    try {
+      await ensureSchema();
+      return;
+    } catch (err) {
+      console.error('Inicializácia schémy zlyhala, skúšam znova o 3 s:', err.message);
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+    }
+  }
 }
 
 function parseCookies(req) {
@@ -134,13 +160,13 @@ function parseCookies(req) {
   }, {});
 }
 
-function getAdminToken(req, url) {
-  return url.searchParams.get('token') || req.headers['x-admin-token'] || parseCookies(req).lunch_admin_token || '';
+function getAdminToken(req) {
+  return req.headers['x-admin-token'] || parseCookies(req).lunch_admin_token || '';
 }
 
-function isAdmin(req, url) {
+function isAdmin(req) {
   if (!ADMIN_TOKEN) return false;
-  const provided = Buffer.from(String(getAdminToken(req, url)));
+  const provided = Buffer.from(String(getAdminToken(req)));
   const expected = Buffer.from(String(ADMIN_TOKEN));
   return provided.length === expected.length && crypto.timingSafeEqual(provided, expected);
 }
@@ -183,11 +209,7 @@ async function readForm(req) {
 }
 
 async function queryTodayMenu() {
-  const client = newClient();
-  await client.connect();
-  try {
-    await ensureSchema(client);
-    const menu = await client.query(`
+  const menu = await pool.query(`
       SELECT
         m.source_id,
         m.source_name,
@@ -221,27 +243,20 @@ async function queryTodayMenu() {
         END,
         m.menu_code NULLS LAST,
         m.title
-    `);
+  `);
 
-    const meta = await client.query(`
-      SELECT MAX(created_at) AS last_updated_at
-      FROM public.lunch_menu_items
-      WHERE menu_date = CURRENT_DATE
-        AND is_available = TRUE
-    `);
+  const meta = await pool.query(`
+    SELECT MAX(created_at) AS last_updated_at
+    FROM public.lunch_menu_items
+    WHERE menu_date = CURRENT_DATE
+      AND is_available = TRUE
+  `);
 
-    return { items: menu.rows, lastUpdatedAt: meta.rows[0]?.last_updated_at || null };
-  } finally {
-    await client.end();
-  }
+  return { items: menu.rows, lastUpdatedAt: meta.rows[0]?.last_updated_at || null };
 }
 
 async function queryAdminData(menuDate) {
-  const client = newClient();
-  await client.connect();
-  try {
-    await ensureSchema(client);
-    const items = await client.query(`
+  const items = await pool.query(`
       SELECT
         id,
         item_uid,
@@ -277,31 +292,28 @@ async function queryAdminData(menuDate) {
         END,
         menu_code NULLS LAST,
         title
-    `, [menuDate]);
+  `, [menuDate]);
 
-    const sources = await client.query(`
-      SELECT
-        source_id,
-        source_name,
-        source_type,
-        source_url,
-        COALESCE(source_location, 'Praca') AS source_location
-      FROM public.lunch_sources
-      ORDER BY source_location, source_name
-    `);
+  const sources = await pool.query(`
+    SELECT
+      source_id,
+      source_name,
+      source_type,
+      source_url,
+      COALESCE(source_location, 'Praca') AS source_location
+    FROM public.lunch_sources
+    ORDER BY source_location, source_name
+  `);
 
-    const locations = await client.query(`
-      SELECT name, weight FROM public.lunch_locations ORDER BY weight, name
-    `);
+  const locations = await pool.query(`
+    SELECT name, weight FROM public.lunch_locations ORDER BY weight, name
+  `);
 
-    return { items: items.rows, sources: sources.rows, locations: locations.rows };
-  } finally {
-    await client.end();
-  }
+  return { items: items.rows, sources: sources.rows, locations: locations.rows };
 }
 
-async function findSource(client, sourceId) {
-  const result = await client.query(`
+async function findSource(db, sourceId) {
+  const result = await db.query(`
     SELECT source_id, source_name, source_type, source_url
     FROM public.lunch_sources
     WHERE source_id = $1
@@ -321,14 +333,12 @@ function makeUid(sourceId, menuDate, menuCode, title) {
 }
 
 async function createItem(form) {
-  const client = newClient();
-  await client.connect();
-  try {
-    await ensureSchema(client);
-    const menuDate = clean(form.menu_date, todayIso());
-    const title = clean(form.title);
-    if (!title) throw new Error('Názov položky je povinný.');
+  const menuDate = clean(form.menu_date, todayIso());
+  const title = clean(form.title);
+  if (!title) throw new Error('Názov položky je povinný.');
 
+  const client = await pool.connect();
+  try {
     const source = await findSource(client, clean(form.source_id, 'manual'));
     const runId = `admin-${menuDate}`;
 
@@ -374,7 +384,7 @@ async function createItem(form) {
     await client.query('ROLLBACK');
     throw err;
   } finally {
-    await client.end();
+    client.release();
   }
 }
 
@@ -384,12 +394,8 @@ async function updateItem(form) {
   const title = clean(form.title);
   if (!title) throw new Error('Názov položky je povinný.');
 
-  const client = newClient();
-  await client.connect();
-  try {
-    await ensureSchema(client);
-    const source = await findSource(client, clean(form.source_id, 'manual'));
-    await client.query(`
+  const source = await findSource(pool, clean(form.source_id, 'manual'));
+  await pool.query(`
       UPDATE public.lunch_menu_items
       SET
         source_id = $2,
@@ -409,96 +415,61 @@ async function updateItem(form) {
         parsed_at = NOW(),
         updated_at = NOW()
       WHERE id = $1
-    `, [
-      id,
-      source.source_id,
-      source.source_name,
-      source.source_type,
-      source.source_url,
-      clean(form.menu_date, todayIso()),
-      clean(form.menu_code),
-      clean(form.category, 'main'),
-      title,
-      clean(form.description),
-      toNumber(form.price_eur),
-      clean(form.currency, 'EUR') || 'EUR',
-      JSON.stringify(allergenArray(form.allergens)),
-      clean(form.raw_text),
-      form.is_available === 'on',
-    ]);
-  } finally {
-    await client.end();
-  }
+  `, [
+    id,
+    source.source_id,
+    source.source_name,
+    source.source_type,
+    source.source_url,
+    clean(form.menu_date, todayIso()),
+    clean(form.menu_code),
+    clean(form.category, 'main'),
+    title,
+    clean(form.description),
+    toNumber(form.price_eur),
+    clean(form.currency, 'EUR') || 'EUR',
+    JSON.stringify(allergenArray(form.allergens)),
+    clean(form.raw_text),
+    form.is_available === 'on',
+  ]);
 }
 
 async function deleteItem(form) {
   const id = Number(form.id);
   if (!Number.isInteger(id)) throw new Error('Neplatné ID položky.');
-  const client = newClient();
-  await client.connect();
-  try {
-    await client.query('DELETE FROM public.lunch_menu_items WHERE id = $1', [id]);
-  } finally {
-    await client.end();
-  }
+  await pool.query('DELETE FROM public.lunch_menu_items WHERE id = $1', [id]);
 }
 
 async function updateRestaurant(form) {
-  const client = newClient();
-  await client.connect();
-  try {
-    await ensureSchema(client);
-    await client.query(`
-      UPDATE public.lunch_sources
-      SET source_location = $2, updated_at = NOW()
-      WHERE source_id = $1
-    `, [clean(form.source_id), clean(form.source_location, 'Praca')]);
-  } finally {
-    await client.end();
-  }
+  await pool.query(`
+    UPDATE public.lunch_sources
+    SET source_location = $2, updated_at = NOW()
+    WHERE source_id = $1
+  `, [clean(form.source_id), clean(form.source_location, 'Praca')]);
 }
 
 async function createLocation(form) {
   const name = clean(form.name);
   if (!name) throw new Error('Názov lokality je povinný.');
   const weight = toNumber(form.weight) ?? 100;
-  const client = newClient();
-  await client.connect();
-  try {
-    await ensureSchema(client);
-    await client.query(`
-      INSERT INTO public.lunch_locations (name, weight) VALUES ($1, $2)
-    `, [name, weight]);
-  } finally {
-    await client.end();
-  }
+  await pool.query(`
+    INSERT INTO public.lunch_locations (name, weight) VALUES ($1, $2)
+  `, [name, weight]);
 }
 
 async function updateLocation(form) {
   const name = clean(form.name);
   if (!name) throw new Error('Názov lokality je povinný.');
   const weight = toNumber(form.weight) ?? 100;
-  const client = newClient();
-  await client.connect();
-  try {
-    await client.query(`
-      UPDATE public.lunch_locations SET weight = $2, updated_at = NOW() WHERE name = $1
-    `, [name, weight]);
-  } finally {
-    await client.end();
-  }
+  await pool.query(`
+    UPDATE public.lunch_locations SET weight = $2, updated_at = NOW() WHERE name = $1
+  `, [name, weight]);
 }
 
 async function deleteLocation(form) {
   const name = clean(form.name);
   if (!name) throw new Error('Názov lokality je povinný.');
-  const client = newClient();
-  await client.connect();
-  try {
-    await client.query(`DELETE FROM public.lunch_locations WHERE name = $1`, [name]);
-  } finally {
-    await client.end();
-  }
+  await pool.query(`DELETE FROM public.lunch_locations WHERE name = $1`, [name]);
 }
 
 function groupByLocationAndSource(items) {
@@ -515,13 +486,13 @@ function groupByLocationAndSource(items) {
 function renderMenuItem(item, index = 0) {
   const code = clean(item.menu_code);
   const category = item.category || 'unknown';
-  const mobileExtra = index >= 3 ? ' mobile-extra' : '';
+  const mobileExtra = index >= 3 ? 'mobile-extra' : '';
   const itemAllergens = Array.isArray(item.allergens) ? item.allergens : [];
   const itemPrice = euro(item.price_eur);
   const chipClasses = categoryChipClasses(category);
 
   return `
-    <article class="grid grid-cols-[1fr_auto] gap-3 items-start p-4 border border-gray-200 dark:border-gray-700 rounded-2xl bg-gray-50 dark:bg-gray-900/60${mobileExtra}">
+    <article class="grid grid-cols-[1fr_auto] gap-3 items-start p-4 border border-gray-200 dark:border-gray-700 rounded-2xl bg-gray-50 dark:bg-gray-900/60 ${mobileExtra}">
       <div>
         <div class="flex items-center flex-wrap gap-2 mb-2">
           ${code ? `<span class="inline-flex items-center justify-center min-w-[34px] h-7 px-2 rounded-full bg-gray-900 dark:bg-gray-700 text-white text-xs font-black">${escapeHtml(code)}</span>` : ''}
@@ -563,7 +534,7 @@ function renderPublicPage(items, error = null, lastUpdatedAt = null) {
       const sourceUrl = rows.find((row) => row.source_url)?.source_url;
       const collapsible = rows.length > 3;
       return `
-        <section class="restaurant-card border border-gray-200 dark:border-gray-700 rounded-3xl bg-white/95 dark:bg-gray-800/95 shadow-lg p-5${collapsible ? ' mobile-collapsible' : ''}">
+        <section class="restaurant-card border border-gray-200 dark:border-gray-700 rounded-3xl bg-white/95 dark:bg-gray-800/95 shadow-lg p-5 ${collapsible ? 'mobile-collapsible' : ''}">
           <div class="flex items-center justify-between gap-4 pb-4 border-b border-gray-200 dark:border-gray-700">
             <div>
               <p class="m-0 mb-1 text-xs font-black text-green-700 dark:text-green-400 uppercase tracking-widest">Reštaurácia</p>
@@ -590,9 +561,9 @@ function renderPublicPage(items, error = null, lastUpdatedAt = null) {
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <title>${escapeHtml(SITE_TITLE)}</title>
-  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/tailwind.css">
   <script>
-    tailwind.config = { darkMode: 'class' };
     (function () {
       const saved = localStorage.getItem('lunch_theme');
       if (saved === 'dark' || (!saved && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
@@ -690,6 +661,7 @@ function renderLogin(message = '') {
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Admin · ${escapeHtml(SITE_TITLE)}</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <style>
     body{margin:0;min-height:100vh;display:grid;place-items:center;font-family:system-ui,-apple-system,"Segoe UI",sans-serif;background:#f3f4f6;color:#111827}
     .box{width:min(420px,calc(100% - 24px));padding:24px;border-radius:24px;background:#fff;box-shadow:0 18px 45px rgba(15,23,42,.10)}
@@ -831,7 +803,8 @@ function renderAdminPage({ items, sources, locations, menuDate, notice = '', err
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Admin · ${escapeHtml(SITE_TITLE)}</title>
-  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/tailwind.css">
   <style>.tab-panel{display:none}.tab-panel.active{display:block}</style>
 </head>
 <body class="bg-gray-100 text-gray-900 min-h-screen antialiased">
@@ -992,7 +965,7 @@ function renderAdminPage({ items, sources, locations, menuDate, notice = '', err
 
 async function adminGet(req, res, url) {
   if (!ADMIN_TOKEN) return sendHtml(res, 503, renderLogin('ADMIN_TOKEN nie je nastavený v .env. Admin je vypnutý.'));
-  if (!isAdmin(req, url)) return sendHtml(res, 401, renderLogin(url.searchParams.get('error') ? 'Nesprávny admin token.' : ''));
+  if (!isAdmin(req)) return sendHtml(res, 401, renderLogin(url.searchParams.get('error') ? 'Nesprávny admin token.' : ''));
 
   const menuDate = url.searchParams.get('date') || todayIso();
   const data = await queryAdminData(menuDate);
@@ -1013,7 +986,7 @@ async function adminPost(req, res, url) {
       : redirect(res, '/admin?error=1');
   }
 
-  if (!isAdmin(req, url)) return redirect(res, '/admin?error=Neautorizovaný prístup');
+  if (!isAdmin(req)) return redirect(res, '/admin?error=Neautorizovaný prístup');
 
   const form = await readForm(req);
   const menuDate = clean(form.menu_date, todayIso());
@@ -1043,6 +1016,18 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (req.method === 'GET' && url.pathname === '/favicon.svg') {
+      res.writeHead(200, { 'content-type': 'image/svg+xml; charset=utf-8', 'cache-control': 'public, max-age=604800' });
+      res.end(faviconSvg);
+      return;
+    }
+
+    if (req.method === 'GET' && url.pathname === '/tailwind.css') {
+      res.writeHead(200, { 'content-type': 'text/css; charset=utf-8', 'cache-control': 'public, max-age=3600' });
+      res.end(tailwindCss);
+      return;
+    }
+
     if (req.method === 'GET' && url.pathname === '/admin/logout') {
       return redirect(res, '/admin', { 'set-cookie': 'lunch_admin_token=; HttpOnly; SameSite=Lax; Path=/admin; Max-Age=0' });
     }
@@ -1057,8 +1042,25 @@ const server = http.createServer(async (req, res) => {
 
     sendHtml(res, 404, '<h1>404</h1>');
   } catch (err) {
-    sendHtml(res, 500, `<h1>Chyba</h1><pre>${escapeHtml(err.message)}</pre>`);
+    console.error(`${req.method} ${url.pathname} zlyhalo:`, err);
+    sendHtml(res, 500, `<h1>Chyba</h1><pre>${escapeHtml(IS_PRODUCTION ? 'Interná chyba servera.' : err.message)}</pre>`);
   }
 });
 
-server.listen(PORT, '0.0.0.0', () => console.log(`obedove-menu listening on ${PORT}`));
+async function start() {
+  await ensureSchemaWithRetry();
+  server.listen(PORT, '0.0.0.0', () => console.log(`obedove-menu listening on ${PORT}`));
+}
+
+function shutdown(signal) {
+  console.log(`${signal} received, shutting down`);
+  server.close(() => {
+    pool.end().finally(() => process.exit(0));
+  });
+  setTimeout(() => process.exit(1), 8000).unref();
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
+
+start();

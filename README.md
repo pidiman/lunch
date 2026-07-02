@@ -34,6 +34,17 @@ nano .env
 docker compose up -d --build
 ```
 
+## Lokálny vývoj
+
+CSS sa builduje cez Tailwind CLI (v Dockeri automaticky v prvom build stage). Pri lokálnom spustení mimo Dockeru:
+
+```bash
+cd app
+npm install
+npm run build:css   # vygeneruje app/tailwind.css
+npm start
+```
+
 ## Web
 
 ```text
