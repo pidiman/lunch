@@ -14,7 +14,8 @@ services:
       # Local SMTP relay used for password reset codes (no auth/TLS)
       - SMTP_HOST=${SMTP_HOST:-smtp-relay}
       - SMTP_PORT=${SMTP_PORT:-25}
-      - SMTP_FROM=${SMTP_FROM:-obedove-menu@localhost}
+      - SMTP_FROM=${SMTP_FROM:-noreply@menu.pidiman.sk}
+      - APP_URL=${APP_URL:-https://menu.pidiman.sk}
       - TZ=Europe/Bratislava
       - NODE_ENV=production
       - PORT=3000
