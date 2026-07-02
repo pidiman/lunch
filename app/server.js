@@ -521,33 +521,33 @@ function renderMenuItem(item, index = 0) {
   const chipClasses = categoryChipClasses(category);
 
   return `
-    <article class="grid grid-cols-[1fr_auto] gap-3 items-start p-4 border border-gray-200 rounded-2xl bg-gray-50${mobileExtra}">
+    <article class="grid grid-cols-[1fr_auto] gap-3 items-start p-4 border border-gray-200 dark:border-gray-700 rounded-2xl bg-gray-50 dark:bg-gray-900/60${mobileExtra}">
       <div>
         <div class="flex items-center flex-wrap gap-2 mb-2">
-          ${code ? `<span class="inline-flex items-center justify-center min-w-[34px] h-7 px-2 rounded-full bg-gray-900 text-white text-xs font-black">${escapeHtml(code)}</span>` : ''}
+          ${code ? `<span class="inline-flex items-center justify-center min-w-[34px] h-7 px-2 rounded-full bg-gray-900 dark:bg-gray-700 text-white text-xs font-black">${escapeHtml(code)}</span>` : ''}
           <span class="inline-flex items-center gap-1 h-7 px-3 rounded-full text-xs font-bold ${chipClasses}">
             <span>${categoryIcon(category)}</span>${escapeHtml(categoryLabel(category))}
           </span>
         </div>
         <h3 class="m-0 text-lg font-bold leading-snug tracking-tight">${escapeHtml(item.title)}</h3>
-        ${item.description ? `<p class="mt-2 text-sm text-gray-500 leading-relaxed">${escapeHtml(item.description)}</p>` : ''}
-        ${itemAllergens.length ? `<p class="mt-2 text-xs text-gray-400"><span class="font-bold">Alergény:</span> ${escapeHtml(itemAllergens.join(', '))}</p>` : ''}
+        ${item.description ? `<p class="mt-2 text-sm text-gray-500 dark:text-gray-400 leading-relaxed">${escapeHtml(item.description)}</p>` : ''}
+        ${itemAllergens.length ? `<p class="mt-2 text-xs text-gray-400 dark:text-gray-500"><span class="font-bold">Alergény:</span> ${escapeHtml(itemAllergens.join(', '))}</p>` : ''}
       </div>
-      ${itemPrice ? `<div class="sticky top-3 px-3 py-2 rounded-full bg-gray-900 text-white font-black text-sm whitespace-nowrap">${escapeHtml(itemPrice)}</div>` : ''}
+      ${itemPrice ? `<div class="sticky top-3 px-3 py-2 rounded-full bg-gray-900 dark:bg-gray-700 text-white font-black text-sm whitespace-nowrap">${escapeHtml(itemPrice)}</div>` : ''}
     </article>
   `;
 }
 
 function categoryChipClasses(category) {
   return {
-    soup: 'bg-orange-50 text-orange-800',
-    main: 'bg-green-50 text-green-800',
-    special: 'bg-amber-50 text-amber-800',
-    pizza: 'bg-red-50 text-red-800',
-    side: 'bg-yellow-50 text-yellow-800',
-    dessert: 'bg-pink-50 text-pink-800',
-    drink: 'bg-blue-50 text-blue-800',
-  }[category] || 'bg-indigo-50 text-indigo-800';
+    soup: 'bg-orange-50 text-orange-800 dark:bg-orange-900/40 dark:text-orange-200',
+    main: 'bg-green-50 text-green-800 dark:bg-green-900/40 dark:text-green-200',
+    special: 'bg-amber-50 text-amber-800 dark:bg-amber-900/40 dark:text-amber-200',
+    pizza: 'bg-red-50 text-red-800 dark:bg-red-900/40 dark:text-red-200',
+    side: 'bg-yellow-50 text-yellow-800 dark:bg-yellow-900/40 dark:text-yellow-200',
+    dessert: 'bg-pink-50 text-pink-800 dark:bg-pink-900/40 dark:text-pink-200',
+    drink: 'bg-blue-50 text-blue-800 dark:bg-blue-900/40 dark:text-blue-200',
+  }[category] || 'bg-indigo-50 text-indigo-800 dark:bg-indigo-900/40 dark:text-indigo-200';
 }
 
 function renderPublicPage(items, error = null, lastUpdatedAt = null) {
@@ -563,25 +563,25 @@ function renderPublicPage(items, error = null, lastUpdatedAt = null) {
       const sourceUrl = rows.find((row) => row.source_url)?.source_url;
       const collapsible = rows.length > 3;
       return `
-        <section class="restaurant-card border border-gray-200 rounded-3xl bg-white/95 shadow-lg p-5${collapsible ? ' mobile-collapsible' : ''}">
-          <div class="flex items-center justify-between gap-4 pb-4 border-b border-gray-200">
+        <section class="restaurant-card border border-gray-200 dark:border-gray-700 rounded-3xl bg-white/95 dark:bg-gray-800/95 shadow-lg p-5${collapsible ? ' mobile-collapsible' : ''}">
+          <div class="flex items-center justify-between gap-4 pb-4 border-b border-gray-200 dark:border-gray-700">
             <div>
-              <p class="m-0 mb-1 text-xs font-black text-green-700 uppercase tracking-widest">Reštaurácia</p>
+              <p class="m-0 mb-1 text-xs font-black text-green-700 dark:text-green-400 uppercase tracking-widest">Reštaurácia</p>
               <h2 class="m-0 text-2xl sm:text-3xl font-black tracking-tight">
                 <button class="restaurant-toggle inline-flex items-baseline gap-2 p-0 border-0 bg-transparent text-inherit font-[inherit] tracking-[inherit] text-left" type="button" aria-expanded="false" ${collapsible ? '' : 'disabled'}>
-                  <span>${escapeHtml(sourceName)}</span>${collapsible ? '<small class="mobile-toggle-text text-xs font-bold text-gray-400 tracking-normal whitespace-nowrap" style="display:none">Zobraziť všetko</small>' : ''}
+                  <span>${escapeHtml(sourceName)}</span>${collapsible ? '<small class="mobile-toggle-text text-xs font-bold text-gray-400 dark:text-gray-500 tracking-normal whitespace-nowrap" style="display:none">Zobraziť všetko</small>' : ''}
                 </button>
               </h2>
             </div>
-            <div class="grid place-items-center min-w-[46px] h-11 rounded-2xl bg-green-100 text-green-800 font-black text-lg flex-none">${rows.length}</div>
+            <div class="grid place-items-center min-w-[46px] h-11 rounded-2xl bg-green-100 dark:bg-green-900/50 text-green-800 dark:text-green-300 font-black text-lg flex-none">${rows.length}</div>
           </div>
           <div class="menu-list grid gap-3 pt-4">${rows.map((row, index) => renderMenuItem(row, index)).join('')}</div>
-          ${sourceUrl ? `<a class="inline-flex items-center mt-4 px-4 py-2.5 rounded-full bg-gray-100 text-gray-700 text-sm font-bold no-underline hover:bg-gray-200" href="${escapeHtml(sourceUrl)}" target="_blank" rel="noreferrer">Otvoriť zdroj menu <span class="ml-1.5">↗</span></a>` : ''}
+          ${sourceUrl ? `<a class="inline-flex items-center mt-4 px-4 py-2.5 rounded-full bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-200 text-sm font-bold no-underline hover:bg-gray-200 dark:hover:bg-gray-600" href="${escapeHtml(sourceUrl)}" target="_blank" rel="noreferrer">Otvoriť zdroj menu <span class="ml-1.5">↗</span></a>` : ''}
         </section>
       `;
     }).join('');
 
-    return `<h2 class="mt-2 mb-0 text-2xl font-black tracking-tight text-gray-900">${escapeHtml(location)}</h2>${restaurants}`;
+    return `<h2 class="mt-2 mb-0 text-2xl font-black tracking-tight text-gray-900 dark:text-gray-100">${escapeHtml(location)}</h2>${restaurants}`;
   }).join('');
 
   return `<!doctype html>
@@ -591,19 +591,30 @@ function renderPublicPage(items, error = null, lastUpdatedAt = null) {
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <title>${escapeHtml(SITE_TITLE)}</title>
   <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = { darkMode: 'class' };
+    (function () {
+      const saved = localStorage.getItem('lunch_theme');
+      if (saved === 'dark' || (!saved && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+        document.documentElement.classList.add('dark');
+      }
+    })();
+  </script>
   <style>
     body { background: radial-gradient(circle at top left, rgba(34,197,94,.15), transparent 32rem), #f3f4f6; }
+    html.dark body { background: radial-gradient(circle at top left, rgba(34,197,94,.08), transparent 32rem), #111827; }
     .hero { background: linear-gradient(135deg, rgba(17,24,39,.98), rgba(22,101,52,.92)), #111827; }
     h1 { font-size: clamp(34px, 8vw, 64px); }
     .mobile-collapsible:not(.expanded) .mobile-extra { display: none; }
     .mobile-collapsible .restaurant-toggle:not(:disabled) { cursor: pointer; }
     .mobile-collapsible .restaurant-toggle:not(:disabled)::after { content: '⌄'; display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; border-radius: 999px; background: #dcfce7; color: #166534; font-size: 18px; }
+    html.dark .mobile-collapsible .restaurant-toggle:not(:disabled)::after { background: #14532d; color: #bbf7d0; }
     .mobile-collapsible.expanded .restaurant-toggle::after { content: '⌃'; }
     .mobile-collapsible .mobile-toggle-text { display: inline !important; }
     .mobile-collapsible.expanded .mobile-toggle-text { display: none !important; }
   </style>
 </head>
-<body class="min-h-screen text-gray-900 antialiased">
+<body class="min-h-screen text-gray-900 dark:text-gray-100 antialiased">
   <main class="max-w-4xl mx-auto px-4 sm:px-5 py-5">
 
     <section class="hero rounded-3xl p-6 sm:p-7 text-white shadow-2xl">
@@ -616,9 +627,12 @@ function renderPublicPage(items, error = null, lastUpdatedAt = null) {
             <span class="text-white/70 text-xs self-center">Aktualizované ${escapeHtml(updatedAt)}</span>
           </div>
         </div>
-        <div class="hidden sm:block flex-none min-w-[164px] p-4 rounded-2xl bg-white/10 border border-white/15 text-right self-start leading-tight">
-          <strong class="block text-sm">${escapeHtml(today)}</strong>
-          <span class="block mt-1 text-white/70 text-xs">Aktualizované ${escapeHtml(updatedAt)}</span>
+        <div class="flex items-start gap-2 flex-none">
+          <div class="hidden sm:block min-w-[164px] p-4 rounded-2xl bg-white/10 border border-white/15 text-right leading-tight">
+            <strong class="block text-sm">${escapeHtml(today)}</strong>
+            <span class="block mt-1 text-white/70 text-xs">Aktualizované ${escapeHtml(updatedAt)}</span>
+          </div>
+          <button id="theme-toggle" type="button" aria-label="Prepnúť tmavý režim" class="grid place-items-center w-11 h-11 rounded-2xl bg-white/10 border border-white/15 text-xl cursor-pointer hover:bg-white/20">🌙</button>
         </div>
       </div>
       <div class="grid grid-cols-3 gap-2">
@@ -638,12 +652,12 @@ function renderPublicPage(items, error = null, lastUpdatedAt = null) {
     </section>
 
     <section class="grid gap-4 mt-5">
-      ${error ? `<div class="border border-gray-200 rounded-3xl bg-white/95 shadow-lg p-6"><h2 class="text-xl font-bold">Menu sa nepodarilo načítať</h2><p class="text-gray-500">${escapeHtml(error)}</p></div>` : ''}
-      ${!error && items.length === 0 ? '<div class="border border-gray-200 rounded-3xl bg-white/95 shadow-lg p-6"><h2 class="text-xl font-bold">Zatiaľ tu nie je menu</h2><p class="text-gray-500">V databáze nie sú položky pre dnešný deň.</p></div>' : ''}
+      ${error ? `<div class="border border-gray-200 dark:border-gray-700 rounded-3xl bg-white/95 dark:bg-gray-800/95 shadow-lg p-6"><h2 class="text-xl font-bold">Menu sa nepodarilo načítať</h2><p class="text-gray-500 dark:text-gray-400">${escapeHtml(error)}</p></div>` : ''}
+      ${!error && items.length === 0 ? '<div class="border border-gray-200 dark:border-gray-700 rounded-3xl bg-white/95 dark:bg-gray-800/95 shadow-lg p-6"><h2 class="text-xl font-bold">Zatiaľ tu nie je menu</h2><p class="text-gray-500 dark:text-gray-400">V databáze nie sú položky pre dnešný deň.</p></div>' : ''}
       ${!error ? content : ''}
     </section>
 
-    <footer class="py-6 text-center text-xs text-gray-400">Powered by n8n · PostgreSQL · Docker · Raspberry Pi homelab</footer>
+    <footer class="py-6 text-center text-xs text-gray-400 dark:text-gray-500">Powered by n8n · PostgreSQL · Docker · Raspberry Pi homelab</footer>
   </main>
   <script>
     document.querySelectorAll('.restaurant-card.mobile-collapsible .restaurant-toggle').forEach((button) => {
@@ -652,6 +666,17 @@ function renderPublicPage(items, error = null, lastUpdatedAt = null) {
         const expanded = card.classList.toggle('expanded');
         button.setAttribute('aria-expanded', expanded ? 'true' : 'false');
       });
+    });
+
+    const themeToggle = document.getElementById('theme-toggle');
+    function syncThemeIcon() {
+      themeToggle.textContent = document.documentElement.classList.contains('dark') ? '☀️' : '🌙';
+    }
+    syncThemeIcon();
+    themeToggle.addEventListener('click', () => {
+      const dark = document.documentElement.classList.toggle('dark');
+      localStorage.setItem('lunch_theme', dark ? 'dark' : 'light');
+      syncThemeIcon();
     });
   </script>
 </body>
