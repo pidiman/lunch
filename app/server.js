@@ -3,11 +3,14 @@ const fs = require('fs');
 const path = require('path');
 const { Pool } = require('pg');
 const crypto = require('crypto');
+const { promisify } = require('util');
+
+const scryptAsync = promisify(crypto.scrypt);
 
 const PORT = Number(process.env.PORT || 3000);
 const SITE_TITLE = process.env.SITE_TITLE || 'Obedové menu';
-const ADMIN_TOKEN = process.env.ADMIN_TOKEN || '';
 const IS_PRODUCTION = process.env.NODE_ENV === 'production';
+const SESSION_TTL_DAYS = 30;
 const LOCATION_OPTIONS = ['Praca', 'Karlovka', 'Stupava'];
 const CATEGORIES = ['soup', 'main', 'special', 'pizza', 'side', 'dessert', 'drink', 'unknown'];
 
@@ -138,6 +141,25 @@ async function ensureSchema() {
       ('Praca', 10), ('Karlovka', 20), ('Stupava', 30)
     ON CONFLICT (name) DO NOTHING
   `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS public.lunch_users (
+      id BIGSERIAL PRIMARY KEY,
+      email TEXT NOT NULL UNIQUE,
+      password_hash TEXT NOT NULL,
+      role TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('admin', 'user')),
+      is_approved BOOLEAN NOT NULL DEFAULT FALSE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS public.lunch_sessions (
+      token_hash TEXT PRIMARY KEY,
+      user_id BIGINT NOT NULL REFERENCES public.lunch_users(id) ON DELETE CASCADE,
+      expires_at TIMESTAMPTZ NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
 }
 
 async function ensureSchemaWithRetry() {
@@ -160,19 +182,133 @@ function parseCookies(req) {
   }, {});
 }
 
-function getAdminToken(req) {
-  return req.headers['x-admin-token'] || parseCookies(req).lunch_admin_token || '';
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+async function hashPassword(password) {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const hash = await scryptAsync(password, salt, 64);
+  return `scrypt:${salt}:${hash.toString('hex')}`;
 }
 
-function isAdmin(req) {
-  if (!ADMIN_TOKEN) return false;
-  const provided = Buffer.from(String(getAdminToken(req)));
-  const expected = Buffer.from(String(ADMIN_TOKEN));
-  return provided.length === expected.length && crypto.timingSafeEqual(provided, expected);
+async function verifyPassword(password, stored) {
+  const [scheme, salt, hex] = String(stored || '').split(':');
+  if (scheme !== 'scrypt' || !salt || !hex) return false;
+  const candidate = await scryptAsync(password, salt, 64);
+  const expected = Buffer.from(hex, 'hex');
+  return candidate.length === expected.length && crypto.timingSafeEqual(candidate, expected);
 }
 
-function adminCookie() {
-  return `lunch_admin_token=${encodeURIComponent(ADMIN_TOKEN)}; HttpOnly; SameSite=Lax; Path=/admin; Max-Age=86400`;
+function hashSessionToken(token) {
+  return crypto.createHash('sha256').update(String(token)).digest('hex');
+}
+
+function sessionCookie(token, maxAgeSeconds = SESSION_TTL_DAYS * 86400) {
+  return `lunch_session=${encodeURIComponent(token)}; HttpOnly; SameSite=Lax; Path=/admin; Max-Age=${maxAgeSeconds}`;
+}
+
+async function createSession(userId) {
+  const token = crypto.randomBytes(32).toString('hex');
+  await pool.query(`DELETE FROM public.lunch_sessions WHERE expires_at < NOW()`);
+  await pool.query(`
+    INSERT INTO public.lunch_sessions (token_hash, user_id, expires_at)
+    VALUES ($1, $2, NOW() + make_interval(days => $3))
+  `, [hashSessionToken(token), userId, SESSION_TTL_DAYS]);
+  return token;
+}
+
+async function getSessionUser(req) {
+  const token = parseCookies(req).lunch_session || '';
+  if (!token) return null;
+  const result = await pool.query(`
+    SELECT u.id, u.email, u.role, u.is_approved
+    FROM public.lunch_sessions s
+    JOIN public.lunch_users u ON u.id = s.user_id
+    WHERE s.token_hash = $1 AND s.expires_at > NOW()
+  `, [hashSessionToken(token)]);
+  const user = result.rows[0];
+  return user && user.is_approved ? user : null;
+}
+
+async function destroySession(req) {
+  const token = parseCookies(req).lunch_session || '';
+  if (token) await pool.query(`DELETE FROM public.lunch_sessions WHERE token_hash = $1`, [hashSessionToken(token)]);
+}
+
+function normalizeEmail(value) {
+  return clean(value).toLowerCase();
+}
+
+async function countUsers() {
+  const result = await pool.query(`SELECT COUNT(*)::int AS n FROM public.lunch_users`);
+  return result.rows[0].n;
+}
+
+async function registerUser(form) {
+  const email = normalizeEmail(form.email);
+  const password = String(form.password || '');
+  if (!EMAIL_RE.test(email)) throw new Error('Zadaj platnú e-mailovú adresu.');
+  if (password.length < 8) throw new Error('Heslo musí mať aspoň 8 znakov.');
+  if (password !== String(form.password_confirm || '')) throw new Error('Heslá sa nezhodujú.');
+
+  const passwordHash = await hashPassword(password);
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    // Lock so two simultaneous first registrations can't both become admin
+    await client.query('LOCK TABLE public.lunch_users IN SHARE ROW EXCLUSIVE MODE');
+    const existing = await client.query(`SELECT COUNT(*)::int AS n FROM public.lunch_users`);
+    const isFirst = existing.rows[0].n === 0;
+    const inserted = await client.query(`
+      INSERT INTO public.lunch_users (email, password_hash, role, is_approved)
+      VALUES ($1, $2, $3, $4)
+      RETURNING id, email, role, is_approved
+    `, [email, passwordHash, isFirst ? 'admin' : 'user', isFirst]);
+    await client.query('COMMIT');
+    return inserted.rows[0];
+  } catch (err) {
+    await client.query('ROLLBACK');
+    if (err.code === '23505') throw new Error('Účet s týmto e-mailom už existuje.');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+async function authenticateUser(form) {
+  const email = normalizeEmail(form.email);
+  const password = String(form.password || '');
+  const result = await pool.query(`
+    SELECT id, email, password_hash, role, is_approved
+    FROM public.lunch_users
+    WHERE email = $1
+  `, [email]);
+  const user = result.rows[0];
+  const ok = user && await verifyPassword(password, user.password_hash);
+  if (!ok) throw new Error('Nesprávny e-mail alebo heslo.');
+  if (!user.is_approved) throw new Error('Účet čaká na schválenie administrátorom.');
+  return user;
+}
+
+async function listUsers() {
+  const result = await pool.query(`
+    SELECT id, email, role, is_approved, created_at
+    FROM public.lunch_users
+    ORDER BY is_approved, created_at
+  `);
+  return result.rows;
+}
+
+async function approveUser(form) {
+  const id = Number(form.id);
+  if (!Number.isInteger(id)) throw new Error('Neplatné ID používateľa.');
+  await pool.query(`UPDATE public.lunch_users SET is_approved = TRUE, updated_at = NOW() WHERE id = $1`, [id]);
+}
+
+async function deleteUser(form, currentUser) {
+  const id = Number(form.id);
+  if (!Number.isInteger(id)) throw new Error('Neplatné ID používateľa.');
+  if (id === Number(currentUser.id)) throw new Error('Nemôžeš zmazať vlastný účet.');
+  await pool.query(`DELETE FROM public.lunch_users WHERE id = $1`, [id]);
 }
 
 function sendHtml(res, status, body, headers = {}) {
@@ -654,35 +790,55 @@ function renderPublicPage(items, error = null, lastUpdatedAt = null) {
 </html>`;
 }
 
-function renderLogin(message = '') {
+function renderAuthPage({ hasUsers = true, error = '', notice = '' } = {}) {
+  const authInput = 'mt-1 w-full border border-gray-300 rounded-xl px-4 py-3 text-base bg-white focus:outline-none focus:ring-2 focus:ring-gray-900';
+  const authLabel = 'block text-xs font-bold text-gray-500 uppercase tracking-wide';
+
   return `<!doctype html>
 <html lang="sk">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Admin · ${escapeHtml(SITE_TITLE)}</title>
+  <title>Prihlásenie · ${escapeHtml(SITE_TITLE)}</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-  <style>
-    body{margin:0;min-height:100vh;display:grid;place-items:center;font-family:system-ui,-apple-system,"Segoe UI",sans-serif;background:#f3f4f6;color:#111827}
-    .box{width:min(420px,calc(100% - 24px));padding:24px;border-radius:24px;background:#fff;box-shadow:0 18px 45px rgba(15,23,42,.10)}
-    h1{margin:0 0 8px;letter-spacing:-.04em}p{margin:0 0 18px;color:#6b7280}.msg{margin-bottom:12px;color:#dc2626;font-weight:800}
-    input{width:100%;padding:13px 14px;border:1px solid #e5e7eb;border-radius:14px;font-size:16px}
-    button{width:100%;margin-top:12px;padding:13px 14px;border:0;border-radius:14px;background:#111827;color:#fff;font-weight:900;font-size:15px;line-height:1.2}
-  </style>
+  <link rel="stylesheet" href="/tailwind.css">
 </head>
-<body>
-  <form class="box" method="post" action="/admin/login">
-    <h1>Admin menu</h1>
-    <p>Zadaj ADMIN_TOKEN z .env.</p>
-    ${message ? `<div class="msg">${escapeHtml(message)}</div>` : ''}
-    <input type="password" name="token" placeholder="Admin token" autofocus>
-    <button type="submit">Prihlásiť</button>
-  </form>
+<body class="min-h-screen grid place-items-center bg-gray-100 text-gray-900 antialiased px-3 py-8">
+  <main class="w-full max-w-md">
+    <div class="bg-white border border-gray-200 rounded-3xl shadow-lg p-6">
+      <h1 class="m-0 text-3xl font-black tracking-tight">Admin menu</h1>
+      <p class="mt-1 mb-5 text-sm text-gray-500">Prihlás sa e-mailom a heslom.</p>
+
+      ${error ? `<div class="mb-4 px-4 py-3 bg-red-50 border border-red-200 text-red-800 font-semibold rounded-xl text-sm">${escapeHtml(error)}</div>` : ''}
+      ${notice ? `<div class="mb-4 px-4 py-3 bg-green-50 border border-green-200 text-green-800 font-semibold rounded-xl text-sm">${escapeHtml(notice)}</div>` : ''}
+
+      <form method="post" action="/admin/login" class="grid gap-3">
+        <label class="block"><span class="${authLabel}">E-mail</span><input type="email" name="email" required autocomplete="username" autofocus class="${authInput}"></label>
+        <label class="block"><span class="${authLabel}">Heslo</span><input type="password" name="password" required autocomplete="current-password" class="${authInput}"></label>
+        <button type="submit" class="mt-1 w-full px-4 py-3 bg-gray-900 hover:bg-gray-800 text-white font-black rounded-xl cursor-pointer border-0">Prihlásiť</button>
+      </form>
+    </div>
+
+    <div class="bg-white border border-gray-200 rounded-3xl shadow-lg p-6 mt-4">
+      <h2 class="m-0 text-lg font-black tracking-tight">Registrácia</h2>
+      <p class="mt-1 mb-4 text-sm text-gray-500">${hasUsers
+        ? 'Nový účet získa rolu <strong>user</strong> a musí ho schváliť admin.'
+        : 'Zatiaľ neexistuje žiadny účet — <strong>prvý zaregistrovaný používateľ sa stane adminom</strong>.'}</p>
+      <form method="post" action="/admin/register" class="grid gap-3">
+        <label class="block"><span class="${authLabel}">E-mail</span><input type="email" name="email" required autocomplete="username" class="${authInput}"></label>
+        <label class="block"><span class="${authLabel}">Heslo (min. 8 znakov)</span><input type="password" name="password" required minlength="8" autocomplete="new-password" class="${authInput}"></label>
+        <label class="block"><span class="${authLabel}">Heslo znova</span><input type="password" name="password_confirm" required minlength="8" autocomplete="new-password" class="${authInput}"></label>
+        <button type="submit" class="mt-1 w-full px-4 py-3 bg-green-600 hover:bg-green-700 text-white font-black rounded-xl cursor-pointer border-0">Registrovať</button>
+      </form>
+    </div>
+  </main>
 </body>
 </html>`;
 }
 
-function renderAdminPage({ items, sources, locations, menuDate, notice = '', error = '', activeTab = 'polozky' }) {
+function renderAdminPage({ items, sources, locations, users = [], currentUser, menuDate, notice = '', error = '', activeTab = 'polozky' }) {
+  const isAdminUser = currentUser.role === 'admin';
+  const tabs = isAdminUser ? ['polozky', 'restauracie', 'lokality', 'pouzivatelia'] : ['polozky', 'restauracie', 'lokality'];
   const tw = {
     input: 'mt-1 w-full border border-gray-300 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-gray-900',
     label: 'block text-xs font-bold text-gray-500 uppercase tracking-wide',
@@ -743,6 +899,33 @@ function renderAdminPage({ items, sources, locations, menuDate, notice = '', err
           <input type="hidden" name="name" value="${escapeHtml(loc.name)}">
           <button type="submit" class="${tw.btnRed}">Zmazať</button>
         </form>
+      </td>
+    </tr>
+  `).join('');
+
+  const userTableRows = users.map((u) => `
+    <tr class="hover:bg-gray-50">
+      <td class="${tw.td} font-semibold">${escapeHtml(u.email)}</td>
+      <td class="${tw.td}"><span class="px-2 py-1 rounded-full text-xs font-bold ${u.role === 'admin' ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-600'}">${escapeHtml(u.role)}</span></td>
+      <td class="${tw.td}">${u.is_approved
+        ? '<span class="px-2 py-1 rounded-full text-xs font-bold bg-green-100 text-green-800">schválený</span>'
+        : '<span class="px-2 py-1 rounded-full text-xs font-bold bg-amber-100 text-amber-800">čaká na schválenie</span>'}</td>
+      <td class="${tw.td} text-gray-500 whitespace-nowrap">${escapeHtml(formatDateSk(new Date(u.created_at)))}</td>
+      <td class="${tw.td}">
+        <div class="flex gap-2 flex-wrap">
+          ${u.is_approved ? '' : `
+          <form method="post" action="/admin/users/approve">
+            <input type="hidden" name="_tab" value="pouzivatelia">
+            <input type="hidden" name="id" value="${escapeHtml(u.id)}">
+            <button type="submit" class="${tw.btnGreen}">Schváliť</button>
+          </form>`}
+          ${Number(u.id) === Number(currentUser.id) ? '' : `
+          <form method="post" action="/admin/users/delete" onsubmit="return confirm('Naozaj zmazať používateľa ${escapeHtml(u.email)}?')">
+            <input type="hidden" name="_tab" value="pouzivatelia">
+            <input type="hidden" name="id" value="${escapeHtml(u.id)}">
+            <button type="submit" class="${tw.btnRed}">Zmazať</button>
+          </form>`}
+        </div>
       </td>
     </tr>
   `).join('');
@@ -815,7 +998,8 @@ function renderAdminPage({ items, sources, locations, menuDate, notice = '', err
         <h1 class="text-4xl font-black tracking-tight leading-none">Admin menu</h1>
         <p class="text-gray-500 mt-1 text-sm">Správa položiek, reštaurácií a lokalít.</p>
       </div>
-      <div class="flex gap-2">
+      <div class="flex items-center gap-2 flex-wrap">
+        <span class="px-3 py-2 bg-white border border-gray-200 rounded-full text-sm text-gray-600">${escapeHtml(currentUser.email)} <span class="ml-1 px-2 py-0.5 rounded-full text-xs font-bold ${isAdminUser ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-600'}">${isAdminUser ? 'admin' : 'user'}</span></span>
         <a href="/" class="${tw.btnGray} no-underline">Web</a>
         <a href="/admin/logout" class="${tw.btnGray} no-underline">Odhlásiť</a>
       </div>
@@ -835,6 +1019,7 @@ function renderAdminPage({ items, sources, locations, menuDate, notice = '', err
       <button class="tab-btn px-5 py-2 rounded-full text-sm font-bold border cursor-pointer" data-tab="polozky">Položky</button>
       <button class="tab-btn px-5 py-2 rounded-full text-sm font-bold border cursor-pointer" data-tab="restauracie">Reštaurácie</button>
       <button class="tab-btn px-5 py-2 rounded-full text-sm font-bold border cursor-pointer" data-tab="lokality">Lokality</button>
+      ${isAdminUser ? '<button class="tab-btn px-5 py-2 rounded-full text-sm font-bold border cursor-pointer" data-tab="pouzivatelia">Používatelia</button>' : ''}
     </div>
 
     <!-- TAB: Položky -->
@@ -940,10 +1125,38 @@ function renderAdminPage({ items, sources, locations, menuDate, notice = '', err
       </div>
     </div>
 
+    ${isAdminUser ? `
+    <!-- TAB: Používatelia -->
+    <div id="tab-pouzivatelia" class="tab-panel">
+      <div class="bg-white border border-gray-200 rounded-2xl shadow-sm overflow-hidden">
+        <div class="px-5 py-3 border-b border-gray-100">
+          <h2 class="text-base font-bold">Používatelia</h2>
+          <p class="text-sm text-gray-400 mt-0.5">Nové registrácie musíš schváliť, kým sa používateľ bude môcť prihlásiť.</p>
+        </div>
+        <div class="overflow-x-auto">
+          <table class="min-w-full divide-y divide-gray-100">
+            <thead class="bg-gray-50">
+              <tr>
+                <th class="${tw.th}">E-mail</th>
+                <th class="${tw.th}">Rola</th>
+                <th class="${tw.th}">Stav</th>
+                <th class="${tw.th}">Registrovaný</th>
+                <th class="${tw.th}">Akcie</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-gray-100 bg-white">
+              ${userTableRows || `<tr><td colspan="5" class="px-5 py-6 text-sm text-gray-400">Žiadni používatelia.</td></tr>`}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+    ` : ''}
+
   </main>
   <script>
     function toggleRow(id) { document.getElementById(id).classList.toggle('hidden'); }
-    const TABS = ['polozky', 'restauracie', 'lokality'];
+    const TABS = ${JSON.stringify(tabs)};
     function activateTab(name) {
       if (!TABS.includes(name)) name = 'polozky';
       TABS.forEach((t) => {
@@ -964,35 +1177,68 @@ function renderAdminPage({ items, sources, locations, menuDate, notice = '', err
 }
 
 async function adminGet(req, res, url) {
-  if (!ADMIN_TOKEN) return sendHtml(res, 503, renderLogin('ADMIN_TOKEN nie je nastavený v .env. Admin je vypnutý.'));
-  if (!isAdmin(req)) return sendHtml(res, 401, renderLogin(url.searchParams.get('error') ? 'Nesprávny admin token.' : ''));
+  const user = await getSessionUser(req);
+  if (!user) {
+    return sendHtml(res, 401, renderAuthPage({
+      hasUsers: (await countUsers()) > 0,
+      error: url.searchParams.get('error') || '',
+      notice: url.searchParams.get('notice') || '',
+    }));
+  }
 
   const menuDate = url.searchParams.get('date') || todayIso();
   const data = await queryAdminData(menuDate);
+  const users = user.role === 'admin' ? await listUsers() : [];
   sendHtml(res, 200, renderAdminPage({
     ...data,
+    users,
+    currentUser: user,
     menuDate,
     notice: url.searchParams.get('notice') || '',
     error: url.searchParams.get('error') || '',
     activeTab: url.searchParams.get('tab') || 'polozky',
-  }), { 'set-cookie': adminCookie() });
+  }));
 }
 
 async function adminPost(req, res, url) {
   if (url.pathname === '/admin/login') {
     const form = await readForm(req);
-    return ADMIN_TOKEN && form.token === ADMIN_TOKEN
-      ? redirect(res, '/admin', { 'set-cookie': adminCookie() })
-      : redirect(res, '/admin?error=1');
+    try {
+      const user = await authenticateUser(form);
+      const token = await createSession(user.id);
+      return redirect(res, '/admin', { 'set-cookie': sessionCookie(token) });
+    } catch (err) {
+      return redirect(res, `/admin?error=${encodeURIComponent(err.message)}`);
+    }
   }
 
-  if (!isAdmin(req)) return redirect(res, '/admin?error=Neautorizovaný prístup');
+  if (url.pathname === '/admin/register') {
+    const form = await readForm(req);
+    try {
+      const user = await registerUser(form);
+      if (user.is_approved) {
+        const token = await createSession(user.id);
+        return redirect(res, '/admin', { 'set-cookie': sessionCookie(token) });
+      }
+      return redirect(res, `/admin?notice=${encodeURIComponent('Registrácia prebehla. Prihlásiť sa budeš môcť po schválení adminom.')}`);
+    } catch (err) {
+      return redirect(res, `/admin?error=${encodeURIComponent(err.message)}`);
+    }
+  }
+
+  const user = await getSessionUser(req);
+  if (!user) return redirect(res, `/admin?error=${encodeURIComponent('Neautorizovaný prístup')}`);
 
   const form = await readForm(req);
   const menuDate = clean(form.menu_date, todayIso());
   const tab = clean(form._tab, 'polozky');
   try {
-    if (url.pathname === '/admin/items/create') await createItem(form);
+    if (url.pathname === '/admin/users/approve' || url.pathname === '/admin/users/delete') {
+      if (user.role !== 'admin') throw new Error('Len admin môže spravovať používateľov.');
+      if (url.pathname === '/admin/users/approve') await approveUser(form);
+      else await deleteUser(form, user);
+    }
+    else if (url.pathname === '/admin/items/create') await createItem(form);
     else if (url.pathname === '/admin/items/update') await updateItem(form);
     else if (url.pathname === '/admin/items/delete') await deleteItem(form);
     else if (url.pathname === '/admin/restaurants/update') await updateRestaurant(form);
@@ -1029,7 +1275,8 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'GET' && url.pathname === '/admin/logout') {
-      return redirect(res, '/admin', { 'set-cookie': 'lunch_admin_token=; HttpOnly; SameSite=Lax; Path=/admin; Max-Age=0' });
+      await destroySession(req);
+      return redirect(res, '/admin', { 'set-cookie': 'lunch_session=; HttpOnly; SameSite=Lax; Path=/admin; Max-Age=0' });
     }
 
     if (req.method === 'GET' && url.pathname === '/admin') return await adminGet(req, res, url);

@@ -57,6 +57,14 @@ Napríklad cez LAN:
 http://192.168.1.50:8094
 ```
 
+## Admin prihlásenie
+
+Admin sekcia (`/admin`) používa účty s e-mailom a heslom (bez `ADMIN_TOKEN`):
+
+- Prvý zaregistrovaný používateľ automaticky získa rolu **admin**.
+- Ďalší registrovaní používatelia dostanú rolu **user** a musia počkať na schválenie adminom (tab „Používatelia").
+- Session platí 30 dní, odhlásenie je cez „Odhlásiť".
+
 ## Healthcheck
 
 ```bash
