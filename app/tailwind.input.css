@@ -4,3 +4,39 @@
 
 /* Dark mode is toggled by adding .dark on <html>, not via prefers-color-scheme */
 @custom-variant dark (&:where(.dark, .dark *));
+
+/* Public page palette; values switch with .dark below */
+@theme inline {
+  --color-ground: var(--lunch-ground);
+  --color-surface: var(--lunch-surface);
+  --color-ink: var(--lunch-ink);
+  --color-muted: var(--lunch-muted);
+  --color-line: var(--lunch-line);
+  --color-line-strong: var(--lunch-line-strong);
+  --color-accent: var(--lunch-accent);
+}
+
+@theme {
+  --font-display: "Bricolage Grotesque", ui-sans-serif, system-ui, sans-serif;
+  --font-body: "Figtree", ui-sans-serif, system-ui, sans-serif;
+}
+
+:root {
+  --lunch-ground: #f4f5f0;
+  --lunch-surface: #ffffff;
+  --lunch-ink: #15281f;
+  --lunch-muted: #5b6b62;
+  --lunch-line: #e2e5dd;
+  --lunch-line-strong: #d9ddd3;
+  --lunch-accent: #d9481e;
+}
+
+.dark {
+  --lunch-ground: #0f1713;
+  --lunch-surface: #17221c;
+  --lunch-ink: #e8efea;
+  --lunch-muted: #9fb0a6;
+  --lunch-line: #26342c;
+  --lunch-line-strong: #34453b;
+  --lunch-accent: #f07a4f;
+}

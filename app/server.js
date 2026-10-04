@@ -83,19 +83,6 @@ function categoryLabel(category) {
   }[category] || 'Menu';
 }
 
-function categoryIcon(category) {
-  return {
-    soup: '🥣',
-    main: '🍽️',
-    special: '⭐',
-    pizza: '🍕',
-    side: '🥔',
-    dessert: '🍰',
-    drink: '🥤',
-    unknown: '🍴',
-  }[category] || '🍴';
-}
-
 function todayIso() {
   const p = new Intl.DateTimeFormat('en-CA', {
     timeZone: 'Europe/Bratislava',
@@ -737,77 +724,121 @@ function groupByLocationAndSource(items) {
   }, {});
 }
 
+function categoryClasses(category) {
+  return {
+    soup: { badge: 'bg-orange-100 text-orange-800 dark:bg-orange-950 dark:text-orange-300', text: 'text-orange-800 dark:text-orange-300' },
+    main: { badge: 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300', text: 'text-emerald-800 dark:text-emerald-300' },
+    special: { badge: 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300', text: 'text-amber-800 dark:text-amber-300' },
+    pizza: { badge: 'bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300', text: 'text-red-800 dark:text-red-300' },
+    side: { badge: 'bg-yellow-100 text-yellow-800 dark:bg-yellow-950 dark:text-yellow-300', text: 'text-yellow-800 dark:text-yellow-300' },
+    dessert: { badge: 'bg-pink-100 text-pink-800 dark:bg-pink-950 dark:text-pink-300', text: 'text-pink-800 dark:text-pink-300' },
+    drink: { badge: 'bg-sky-100 text-sky-800 dark:bg-sky-950 dark:text-sky-300', text: 'text-sky-800 dark:text-sky-300' },
+  }[category] || { badge: 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300', text: 'text-slate-700 dark:text-slate-300' };
+}
+
+function plural(n, one, few, many) {
+  if (n === 1) return one;
+  return n >= 2 && n <= 4 ? few : many;
+}
+
+function formatHeroDate(value = new Date()) {
+  const opts = { timeZone: 'Europe/Bratislava' };
+  const weekday = new Intl.DateTimeFormat('sk-SK', { ...opts, weekday: 'long' }).format(value);
+  const date = new Intl.DateTimeFormat('sk-SK', { ...opts, day: '2-digit', month: '2-digit', year: 'numeric' }).format(value);
+  return `${weekday.charAt(0).toUpperCase()}${weekday.slice(1)} · ${date}`;
+}
+
+function cheapestMainPrice(items) {
+  const prices = (category) => items
+    .filter((item) => !category || category.includes(item.category))
+    .map((item) => Number(item.price_eur))
+    .filter((n) => Number.isFinite(n) && n > 0);
+  const mains = prices(['main', 'special', 'pizza']);
+  const any = mains.length ? mains : prices(null);
+  return any.length ? euro(Math.min(...any)).replace(' €', '€') : '—';
+}
+
+const ARROW_SVG = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M7 17 17 7M8 7h9v9"/></svg>';
+
 function renderMenuItem(item, index = 0) {
   const code = clean(item.menu_code);
   const category = item.category || 'unknown';
-  const mobileExtra = index >= 3 ? 'mobile-extra' : '';
+  const label = categoryLabel(category);
+  const cls = categoryClasses(category);
   const itemAllergens = Array.isArray(item.allergens) ? item.allergens : [];
   const itemPrice = euro(item.price_eur);
-  const chipClasses = categoryChipClasses(category);
 
   return `
-    <article class="grid grid-cols-[1fr_auto] gap-3 items-start p-4 border border-gray-200 dark:border-gray-700 rounded-2xl bg-gray-50 dark:bg-gray-900/60 ${mobileExtra}">
-      <div>
-        <div class="flex items-center flex-wrap gap-2 mb-2">
-          ${code ? `<span class="inline-flex items-center justify-center min-w-[34px] h-7 px-2 rounded-full bg-gray-900 dark:bg-gray-700 text-white text-xs font-black">${escapeHtml(code)}</span>` : ''}
-          <span class="inline-flex items-center gap-1 h-7 px-3 rounded-full text-xs font-bold ${chipClasses}">
-            <span>${categoryIcon(category)}</span>${escapeHtml(categoryLabel(category))}
-          </span>
-        </div>
-        <h3 class="m-0 text-lg font-bold leading-snug tracking-tight">${escapeHtml(item.title)}</h3>
-        ${item.description ? `<p class="mt-2 text-sm text-gray-500 dark:text-gray-400 leading-relaxed">${escapeHtml(item.description)}</p>` : ''}
-        ${itemAllergens.length ? `<p class="mt-2 text-xs text-gray-400 dark:text-gray-500"><span class="font-bold">Alergény:</span> ${escapeHtml(itemAllergens.join(', '))}</p>` : ''}
+    <div class="grid grid-cols-[36px_minmax(0,1fr)_auto] gap-3.5 items-start py-3.5 border-t border-dashed border-line ${index >= 3 ? 'mobile-extra' : ''}">
+      <span class="grid place-items-center w-9 h-9 rounded-full text-sm font-bold ${cls.badge}" aria-hidden="true">${escapeHtml(code || label.charAt(0))}</span>
+      <div class="min-w-0">
+        <div class="text-xs font-bold uppercase tracking-wider ${cls.text}">${code ? `<span class="sr-only">Menu ${escapeHtml(code)}, </span>` : ''}${escapeHtml(label)}</div>
+        <h4 class="m-0 mt-0.5 text-[17px] font-semibold leading-snug">${escapeHtml(item.title)}</h4>
+        ${item.description ? `<p class="m-0 mt-0.5 text-sm text-muted">${escapeHtml(item.description)}</p>` : ''}
+        ${itemAllergens.length ? `<p class="m-0 mt-1 text-xs text-muted">Alergény ${escapeHtml(itemAllergens.join(', '))}</p>` : ''}
       </div>
-      ${itemPrice ? `<div class="sticky top-3 px-3 py-2 rounded-full bg-gray-900 dark:bg-gray-700 text-white font-black text-sm whitespace-nowrap">${escapeHtml(itemPrice)}</div>` : ''}
-    </article>
+      ${itemPrice ? `<div class="pt-3.5 font-display font-bold text-[19px] whitespace-nowrap">${escapeHtml(itemPrice)}</div>` : '<div></div>'}
+    </div>
   `;
 }
 
-function categoryChipClasses(category) {
-  return {
-    soup: 'bg-orange-50 text-orange-800 dark:bg-orange-900/40 dark:text-orange-200',
-    main: 'bg-green-50 text-green-800 dark:bg-green-900/40 dark:text-green-200',
-    special: 'bg-amber-50 text-amber-800 dark:bg-amber-900/40 dark:text-amber-200',
-    pizza: 'bg-red-50 text-red-800 dark:bg-red-900/40 dark:text-red-200',
-    side: 'bg-yellow-50 text-yellow-800 dark:bg-yellow-900/40 dark:text-yellow-200',
-    dessert: 'bg-pink-50 text-pink-800 dark:bg-pink-900/40 dark:text-pink-200',
-    drink: 'bg-blue-50 text-blue-800 dark:bg-blue-900/40 dark:text-blue-200',
-  }[category] || 'bg-indigo-50 text-indigo-800 dark:bg-indigo-900/40 dark:text-indigo-200';
-}
-
 function renderPublicPage(items, error = null, lastUpdatedAt = null) {
-  const today = formatDateSk(new Date());
+  const today = formatHeroDate(new Date());
   const updatedAt = formatTime(lastUpdatedAt);
+  const updatedLabel = updatedAt === '—' ? 'Zatiaľ bez aktualizácie' : `Aktualizované o ${updatedAt}`;
   const grouped = groupByLocationAndSource(items);
+  const sourceCount = new Set(items.map((item) => item.source_id)).size;
 
   // Order comes from the DB query (already sorted by location weight), preserve insertion order
   const locations = Object.keys(grouped);
+  const locationItemCount = (location) => Object.values(grouped[location]).reduce((sum, rows) => sum + rows.length, 0);
 
   const content = locations.map((location) => {
-    const restaurants = Object.entries(grouped[location]).map(([sourceName, rows]) => {
+    const restaurantEntries = Object.entries(grouped[location]);
+    const itemCount = locationItemCount(location);
+    const restaurants = restaurantEntries.map(([sourceName, rows]) => {
       const sourceUrl = rows.find((row) => row.source_url)?.source_url;
       const collapsible = rows.length > 3;
       return `
-        <section class="restaurant-card border border-gray-200 dark:border-gray-700 rounded-3xl bg-white/95 dark:bg-gray-800/95 shadow-lg p-5 ${collapsible ? 'mobile-collapsible' : ''}">
-          <div class="flex items-center justify-between gap-4 pb-4 border-b border-gray-200 dark:border-gray-700">
-            <div>
-              <p class="m-0 mb-1 text-xs font-black text-green-700 dark:text-green-400 uppercase tracking-widest">Reštaurácia</p>
-              <h2 class="m-0 text-2xl sm:text-3xl font-black tracking-tight">
-                <button class="restaurant-toggle inline-flex items-baseline gap-2 p-0 border-0 bg-transparent text-inherit font-[inherit] tracking-[inherit] text-left" type="button" aria-expanded="false" ${collapsible ? '' : 'disabled'}>
-                  <span>${escapeHtml(sourceName)}</span>${collapsible ? '<small class="mobile-toggle-text text-xs font-bold text-gray-400 dark:text-gray-500 tracking-normal whitespace-nowrap" style="display:none">Zobraziť všetko</small>' : ''}
-                </button>
-              </h2>
-            </div>
-            <div class="grid place-items-center min-w-[46px] h-11 rounded-2xl bg-green-100 dark:bg-green-900/50 text-green-800 dark:text-green-300 font-black text-lg flex-none">${rows.length}</div>
+        <article class="restaurant-card flex flex-col bg-surface border border-line rounded-3xl p-5 sm:p-6 ${collapsible ? 'mobile-collapsible' : ''}">
+          <div class="flex items-center justify-between gap-3 pb-3.5">
+            <h3 class="m-0 font-display font-bold text-2xl tracking-tight">${escapeHtml(sourceName)}</h3>
+            ${sourceUrl ? `<a class="inline-flex items-center gap-1 min-h-11 text-sm font-semibold text-ink no-underline hover:text-accent" href="${escapeHtml(sourceUrl)}" target="_blank" rel="noreferrer">Zdroj menu ${ARROW_SVG}</a>` : ''}
           </div>
-          <div class="menu-list grid gap-3 pt-4">${rows.map((row, index) => renderMenuItem(row, index)).join('')}</div>
-          ${sourceUrl ? `<a class="inline-flex items-center mt-4 px-4 py-2.5 rounded-full bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-200 text-sm font-bold no-underline hover:bg-gray-200 dark:hover:bg-gray-600" href="${escapeHtml(sourceUrl)}" target="_blank" rel="noreferrer">Otvoriť zdroj menu <span class="ml-1.5">↗</span></a>` : ''}
-        </section>
+          <div>${rows.map((row, index) => renderMenuItem(row, index)).join('')}</div>
+          ${collapsible ? `<button type="button" class="restaurant-toggle sm:hidden mt-1 min-h-11 w-full rounded-2xl border border-line-strong bg-transparent text-ink text-sm font-semibold cursor-pointer" aria-expanded="false"><span class="toggle-more">Zobraziť všetko (${rows.length})</span><span class="toggle-less">Zobraziť menej</span></button>` : ''}
+        </article>
       `;
     }).join('');
 
-    return `<h2 class="mt-2 mb-0 text-2xl font-black tracking-tight text-gray-900 dark:text-gray-100">${escapeHtml(location)}</h2>${restaurants}`;
+    return `
+      <section class="location-section pb-10" data-location="${escapeHtml(location)}">
+        <div class="flex flex-wrap items-baseline gap-x-3 gap-y-1 mb-4">
+          <span class="w-2.5 h-2.5 rounded-full bg-accent self-center flex-none"></span>
+          <h2 class="m-0 font-display font-bold text-3xl tracking-tight">${escapeHtml(location)}</h2>
+          <span class="text-sm text-muted">${restaurantEntries.length} ${plural(restaurantEntries.length, 'reštaurácia', 'reštaurácie', 'reštaurácií')} · ${itemCount} ${plural(itemCount, 'jedlo', 'jedlá', 'jedál')}</span>
+        </div>
+        <div class="grid gap-4 grid-cols-[repeat(auto-fit,minmax(min(100%,420px),1fr))]">${restaurants}</div>
+      </section>
+    `;
   }).join('');
+
+  const tabClass = 'location-tab inline-flex items-center gap-2 h-11 px-4.5 rounded-full border text-[15px] font-semibold cursor-pointer bg-surface text-ink border-line-strong hover:border-ink aria-pressed:bg-ink aria-pressed:text-ground aria-pressed:border-ink';
+  const tabs = locations.length > 1 ? [
+    `<button type="button" class="${tabClass}" data-location="all" aria-pressed="true">Všetky lokality <span class="text-[13px] opacity-70">${items.length}</span></button>`,
+    ...locations.map((location) => `<button type="button" class="${tabClass}" data-location="${escapeHtml(location)}" aria-pressed="false">${escapeHtml(location)} <span class="text-[13px] opacity-70">${locationItemCount(location)}</span></button>`),
+  ].join('') : '';
+
+  const statTile = (value, label) => `
+    <div class="bg-surface border border-line rounded-[18px] p-3.5 sm:p-4">
+      <div class="font-display font-extrabold text-[28px] sm:text-[34px] leading-none">${escapeHtml(value)}</div>
+      <div class="mt-1.5 text-[13px] font-semibold text-muted">${escapeHtml(label)}</div>
+    </div>`;
+
+  const notice = (title, text) => `<div class="bg-surface border border-line rounded-3xl p-6 mb-10"><h2 class="m-0 font-display font-bold text-2xl tracking-tight">${escapeHtml(title)}</h2><p class="m-0 mt-2 text-muted">${escapeHtml(text)}</p></div>`;
+  const inputClass = 'mt-1 w-full border border-line-strong rounded-xl px-4 py-3 text-base bg-ground text-ink focus:outline-none focus:ring-2 focus:ring-accent';
+  const labelClass = 'block text-xs font-bold text-muted uppercase tracking-wide';
+  const paneBtnClass = 'auth-pane-btn h-10 px-4 rounded-full text-sm font-semibold border cursor-pointer bg-surface text-muted border-line-strong aria-pressed:bg-ink aria-pressed:text-ground aria-pressed:border-ink';
 
   return `<!doctype html>
 <html lang="sk">
@@ -816,120 +847,123 @@ function renderPublicPage(items, error = null, lastUpdatedAt = null) {
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <title>${escapeHtml(SITE_TITLE)}</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,700;12..96,800&family=Figtree:wght@400;500;600;700&display=swap">
   <link rel="stylesheet" href="/tailwind.css">
   <script>
     (function () {
-      const saved = localStorage.getItem('lunch_theme');
+      let saved = null;
+      try { saved = localStorage.getItem('lunch_theme'); } catch {}
       if (saved === 'dark' || (!saved && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
         document.documentElement.classList.add('dark');
       }
     })();
   </script>
   <style>
-    body { background: radial-gradient(circle at top left, rgba(34,197,94,.15), transparent 32rem), #f3f4f6; }
-    html.dark body { background: radial-gradient(circle at top left, rgba(34,197,94,.08), transparent 32rem), #111827; }
-    .hero { background: linear-gradient(135deg, rgba(17,24,39,.98), rgba(22,101,52,.92)), #111827; }
-    h1 { font-size: clamp(34px, 8vw, 64px); }
-    .mobile-collapsible:not(.expanded) .mobile-extra { display: none; }
-    .mobile-collapsible .restaurant-toggle:not(:disabled) { cursor: pointer; }
-    .mobile-collapsible .restaurant-toggle:not(:disabled)::after { content: '⌄'; display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; border-radius: 999px; background: #dcfce7; color: #166534; font-size: 18px; }
-    html.dark .mobile-collapsible .restaurant-toggle:not(:disabled)::after { background: #14532d; color: #bbf7d0; }
-    .mobile-collapsible.expanded .restaurant-toggle::after { content: '⌃'; }
-    .mobile-collapsible .mobile-toggle-text { display: inline !important; }
-    .mobile-collapsible.expanded .mobile-toggle-text { display: none !important; }
+    @media (max-width: 639px) {
+      .mobile-collapsible:not(.expanded) .mobile-extra { display: none; }
+    }
+    .restaurant-card .toggle-less, .restaurant-card.expanded .toggle-more { display: none; }
+    .restaurant-card.expanded .toggle-less { display: inline; }
   </style>
 </head>
-<body class="min-h-screen text-gray-900 dark:text-gray-100 antialiased">
-  <main class="max-w-4xl mx-auto px-4 sm:px-5 py-5">
+<body class="min-h-screen bg-ground text-ink font-body antialiased">
+  <div class="max-w-[1160px] mx-auto px-4">
 
-    <section class="hero rounded-3xl p-6 sm:p-7 text-white shadow-2xl">
-      <div class="flex items-start justify-between gap-4 mb-7">
-        <div>
-          <div class="inline-flex items-center gap-2 px-3 py-2 rounded-full text-sm font-bold border border-white/20 bg-white/10">🍽️ ${escapeHtml(SITE_TITLE)}</div>
-          <h1 class="m-0 mt-3 font-black leading-none tracking-tight">Dnešné obedové menu</h1>
-          <div class="flex gap-2 flex-wrap mt-2 sm:hidden">
-            <strong class="text-sm">${escapeHtml(today)}</strong>
-            <span class="text-white/70 text-xs self-center">Aktualizované ${escapeHtml(updatedAt)}</span>
-          </div>
-        </div>
-        <div class="flex items-start gap-2 flex-none">
-          <div class="hidden sm:block min-w-[164px] p-4 rounded-2xl bg-white/10 border border-white/15 text-right leading-tight">
-            <strong class="block text-sm">${escapeHtml(today)}</strong>
-            <span class="block mt-1 text-white/70 text-xs">Aktualizované ${escapeHtml(updatedAt)}</span>
-          </div>
-          <button id="login-open" type="button" class="inline-flex items-center h-11 px-4 rounded-2xl bg-white/10 border border-white/15 text-sm font-bold cursor-pointer hover:bg-white/20 whitespace-nowrap">Prihlásiť sa</button>
-          <button id="theme-toggle" type="button" aria-label="Prepnúť tmavý režim" class="grid place-items-center w-11 h-11 rounded-2xl bg-white/10 border border-white/15 text-xl cursor-pointer hover:bg-white/20">🌙</button>
-        </div>
+    <header class="flex items-center justify-between gap-3 py-5">
+      <div class="flex items-center gap-2.5 sm:gap-3 min-w-0">
+        <svg width="40" height="40" viewBox="0 0 40 40" fill="none" aria-hidden="true"><rect width="40" height="40" rx="12" class="fill-ink"/><circle cx="20" cy="21" r="10" stroke-width="2.4" class="stroke-ground"/><path d="M15 12c2-2 8-2 10 0" stroke-width="2.4" stroke-linecap="round" class="stroke-accent"/></svg>
+        <span class="font-display font-bold text-lg sm:text-xl tracking-tight truncate">${escapeHtml(SITE_TITLE)}</span>
       </div>
-      <div class="grid grid-cols-3 gap-2">
-        <div class="p-3 sm:p-4 rounded-2xl bg-white/10 border border-white/15">
-          <strong class="block text-2xl font-black leading-none">${items.length}</strong>
-          <span class="block mt-1.5 text-white/70 text-xs font-semibold">položiek menu</span>
-        </div>
-        <div class="p-3 sm:p-4 rounded-2xl bg-white/10 border border-white/15">
-          <strong class="block text-2xl font-black leading-none">${new Set(items.map((item) => item.source_id)).size}</strong>
-          <span class="block mt-1.5 text-white/70 text-xs font-semibold">zdrojov</span>
-        </div>
-        <div class="p-3 sm:p-4 rounded-2xl bg-white/10 border border-white/15">
-          <strong class="block text-2xl font-black leading-none">${locations.length}</strong>
-          <span class="block mt-1.5 text-white/70 text-xs font-semibold">lokalít</span>
-        </div>
+      <div class="flex items-center gap-2 flex-none">
+        <button id="theme-toggle" type="button" aria-label="Prepnúť tmavý režim" class="grid place-items-center w-11 h-11 rounded-xl border border-line-strong bg-surface text-ink cursor-pointer hover:border-ink">
+          <svg class="dark:hidden" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+          <svg class="hidden dark:block" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+        </button>
+        <button id="login-open" type="button" class="h-11 px-3.5 sm:px-4.5 rounded-xl border-0 bg-ink text-ground text-[15px] font-semibold cursor-pointer hover:opacity-90">Prihlásiť sa</button>
+      </div>
+    </header>
+
+    <section class="flex flex-wrap items-end justify-between gap-8 pt-6 sm:pt-10 pb-8">
+      <div class="flex-[1_1_520px] min-w-0">
+        <p class="m-0 mb-3.5 text-[15px] font-semibold text-muted">${escapeHtml(today)}</p>
+        <h1 class="m-0 font-display font-extrabold text-[clamp(44px,7vw,88px)] leading-[0.95] tracking-[-0.035em]">Čo je dnes<br>na obed?</h1>
+      </div>
+      <div class="flex-[0_1_400px] grid grid-cols-3 gap-2.5">
+        ${statTile(String(items.length), plural(items.length, 'jedlo', 'jedlá', 'jedál'))}
+        ${statTile(String(sourceCount), plural(sourceCount, 'reštaurácia', 'reštaurácie', 'reštaurácií'))}
+        ${statTile(cheapestMainPrice(items), 'najlacnejšie')}
       </div>
     </section>
 
-    <section class="grid gap-4 mt-5">
-      ${error ? `<div class="border border-gray-200 dark:border-gray-700 rounded-3xl bg-white/95 dark:bg-gray-800/95 shadow-lg p-6"><h2 class="text-xl font-bold">Menu sa nepodarilo načítať</h2><p class="text-gray-500 dark:text-gray-400">${escapeHtml(error)}</p></div>` : ''}
-      ${!error && items.length === 0 ? '<div class="border border-gray-200 dark:border-gray-700 rounded-3xl bg-white/95 dark:bg-gray-800/95 shadow-lg p-6"><h2 class="text-xl font-bold">Zatiaľ tu nie je menu</h2><p class="text-gray-500 dark:text-gray-400">V databáze nie sú položky pre dnešný deň.</p></div>' : ''}
+    <nav aria-label="Lokality" class="flex flex-wrap items-center gap-2 pt-3.5 pb-7 border-t border-line">
+      ${tabs}
+      <span class="ml-auto text-sm text-muted">${escapeHtml(updatedLabel)}</span>
+    </nav>
+
+    <main>
+      ${error ? notice('Menu sa nepodarilo načítať', error) : ''}
+      ${!error && items.length === 0 ? notice('Zatiaľ tu nie je menu', 'V databáze nie sú položky pre dnešný deň.') : ''}
       ${!error ? content : ''}
-    </section>
+    </main>
 
-    <footer class="py-6 text-center text-xs text-gray-400 dark:text-gray-500">Powered by n8n · PostgreSQL · Docker · Raspberry Pi homelab</footer>
-  </main>
+    <footer class="flex flex-wrap justify-between gap-2 py-6 pb-10 border-t border-line text-[13px] text-muted">
+      <span>${escapeHtml(SITE_TITLE)}</span>
+      <span>n8n · PostgreSQL · Docker · Raspberry Pi</span>
+    </footer>
+  </div>
 
   <div id="login-modal" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/60 p-4">
-    <div class="w-full max-w-md bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-3xl shadow-2xl p-6 relative">
-      <button id="login-close" type="button" aria-label="Zavrieť" class="absolute top-4 right-4 grid place-items-center w-9 h-9 rounded-full bg-gray-100 dark:bg-gray-700 text-gray-500 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-600 cursor-pointer border-0 text-base">✕</button>
+    <div role="dialog" aria-modal="true" aria-label="Prihlásenie" class="w-full max-w-md bg-surface text-ink border border-line rounded-3xl shadow-2xl p-6 relative">
+      <button id="login-close" type="button" aria-label="Zavrieť" class="absolute top-4 right-4 grid place-items-center w-10 h-10 rounded-full bg-ground text-muted hover:text-ink cursor-pointer border-0">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>
+      </button>
 
       <div class="flex gap-2 mb-5">
-        <button type="button" class="auth-pane-btn px-4 py-2 rounded-full text-sm font-bold border cursor-pointer" data-pane="login">Prihlásenie</button>
-        <button type="button" class="auth-pane-btn px-4 py-2 rounded-full text-sm font-bold border cursor-pointer" data-pane="register">Registrácia</button>
+        <button type="button" class="${paneBtnClass}" data-pane="login" aria-pressed="true">Prihlásenie</button>
+        <button type="button" class="${paneBtnClass}" data-pane="register" aria-pressed="false">Registrácia</button>
       </div>
 
       <form id="pane-login" method="post" action="/admin/login" class="grid gap-3">
-        <label class="block"><span class="block text-xs font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wide">E-mail</span><input type="email" name="email" required autocomplete="username" class="mt-1 w-full border border-gray-300 dark:border-gray-600 rounded-xl px-4 py-3 text-base bg-white dark:bg-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-green-600"></label>
-        <label class="block"><span class="block text-xs font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wide">Heslo</span><input type="password" name="password" required autocomplete="current-password" class="mt-1 w-full border border-gray-300 dark:border-gray-600 rounded-xl px-4 py-3 text-base bg-white dark:bg-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-green-600"></label>
-        <button type="submit" class="mt-1 w-full px-4 py-3 bg-gray-900 dark:bg-gray-700 hover:bg-gray-800 dark:hover:bg-gray-600 text-white font-black rounded-xl cursor-pointer border-0">Prihlásiť</button>
-        <a href="/admin?view=reset" class="text-sm font-bold text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200 no-underline justify-self-start">Zabudnuté heslo?</a>
+        <label class="block"><span class="${labelClass}">E-mail</span><input type="email" name="email" required autocomplete="username" class="${inputClass}"></label>
+        <label class="block"><span class="${labelClass}">Heslo</span><input type="password" name="password" required autocomplete="current-password" class="${inputClass}"></label>
+        <button type="submit" class="mt-1 w-full px-4 py-3 bg-ink text-ground font-bold rounded-xl cursor-pointer border-0 hover:opacity-90">Prihlásiť</button>
+        <a href="/admin?view=reset" class="text-sm font-semibold text-muted hover:text-ink no-underline justify-self-start">Zabudnuté heslo?</a>
       </form>
 
       <form id="pane-register" method="post" action="/admin/register" class="hidden grid gap-3">
-        <p class="m-0 text-sm text-gray-500 dark:text-gray-400">Nový účet musí schváliť admin. Úplne prvý zaregistrovaný účet sa stáva adminom.</p>
-        <label class="block"><span class="block text-xs font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wide">E-mail</span><input type="email" name="email" required autocomplete="username" class="mt-1 w-full border border-gray-300 dark:border-gray-600 rounded-xl px-4 py-3 text-base bg-white dark:bg-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-green-600"></label>
-        <label class="block"><span class="block text-xs font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wide">Heslo (min. 8 znakov)</span><input type="password" name="password" required minlength="8" autocomplete="new-password" class="mt-1 w-full border border-gray-300 dark:border-gray-600 rounded-xl px-4 py-3 text-base bg-white dark:bg-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-green-600"></label>
-        <label class="block"><span class="block text-xs font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wide">Heslo znova</span><input type="password" name="password_confirm" required minlength="8" autocomplete="new-password" class="mt-1 w-full border border-gray-300 dark:border-gray-600 rounded-xl px-4 py-3 text-base bg-white dark:bg-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-green-600"></label>
-        <button type="submit" class="mt-1 w-full px-4 py-3 bg-green-600 hover:bg-green-700 text-white font-black rounded-xl cursor-pointer border-0">Registrovať</button>
+        <p class="m-0 text-sm text-muted">Nový účet musí schváliť admin. Úplne prvý zaregistrovaný účet sa stáva adminom.</p>
+        <label class="block"><span class="${labelClass}">E-mail</span><input type="email" name="email" required autocomplete="username" class="${inputClass}"></label>
+        <label class="block"><span class="${labelClass}">Heslo (min. 8 znakov)</span><input type="password" name="password" required minlength="8" autocomplete="new-password" class="${inputClass}"></label>
+        <label class="block"><span class="${labelClass}">Heslo znova</span><input type="password" name="password_confirm" required minlength="8" autocomplete="new-password" class="${inputClass}"></label>
+        <button type="submit" class="mt-1 w-full px-4 py-3 bg-ink text-ground font-bold rounded-xl cursor-pointer border-0 hover:opacity-90">Registrovať</button>
       </form>
     </div>
   </div>
 
   <script>
-    document.querySelectorAll('.restaurant-card.mobile-collapsible .restaurant-toggle').forEach((button) => {
+    document.querySelectorAll('.restaurant-toggle').forEach((button) => {
       button.addEventListener('click', () => {
-        const card = button.closest('.restaurant-card');
-        const expanded = card.classList.toggle('expanded');
+        const expanded = button.closest('.restaurant-card').classList.toggle('expanded');
         button.setAttribute('aria-expanded', expanded ? 'true' : 'false');
       });
     });
 
-    const themeToggle = document.getElementById('theme-toggle');
-    function syncThemeIcon() {
-      themeToggle.textContent = document.documentElement.classList.contains('dark') ? '☀️' : '🌙';
-    }
-    syncThemeIcon();
-    themeToggle.addEventListener('click', () => {
+    const locationTabs = document.querySelectorAll('.location-tab');
+    locationTabs.forEach((tab) => {
+      tab.addEventListener('click', () => {
+        const location = tab.dataset.location;
+        locationTabs.forEach((t) => t.setAttribute('aria-pressed', t === tab ? 'true' : 'false'));
+        document.querySelectorAll('.location-section').forEach((section) => {
+          section.hidden = location !== 'all' && section.dataset.location !== location;
+        });
+      });
+    });
+
+    document.getElementById('theme-toggle').addEventListener('click', () => {
       const dark = document.documentElement.classList.toggle('dark');
-      localStorage.setItem('lunch_theme', dark ? 'dark' : 'light');
-      syncThemeIcon();
+      try { localStorage.setItem('lunch_theme', dark ? 'dark' : 'light'); } catch {}
     });
 
     const loginModal = document.getElementById('login-modal');
@@ -941,14 +975,8 @@ function renderPublicPage(items, error = null, lastUpdatedAt = null) {
     function setPane(name) {
       document.getElementById('pane-login').classList.toggle('hidden', name !== 'login');
       document.getElementById('pane-register').classList.toggle('hidden', name !== 'register');
-      document.querySelectorAll('.auth-pane-btn').forEach((btn) => {
-        const on = btn.dataset.pane === name;
-        btn.className = 'auth-pane-btn px-4 py-2 rounded-full text-sm font-bold border cursor-pointer ' +
-          (on ? 'bg-gray-900 text-white border-gray-900 dark:bg-gray-100 dark:text-gray-900 dark:border-gray-100'
-              : 'bg-white text-gray-500 border-gray-200 dark:bg-gray-800 dark:text-gray-400 dark:border-gray-600');
-      });
+      document.querySelectorAll('.auth-pane-btn').forEach((btn) => btn.setAttribute('aria-pressed', btn.dataset.pane === name ? 'true' : 'false'));
     }
-    setPane('login');
     document.getElementById('login-open').addEventListener('click', () => setModalOpen(true));
     document.getElementById('login-close').addEventListener('click', () => setModalOpen(false));
     loginModal.addEventListener('click', (event) => { if (event.target === loginModal) setModalOpen(false); });
