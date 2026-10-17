@@ -175,7 +175,7 @@ async function getSessionUser(req) {
   const token = parseCookies(req).lunch_session || '';
   if (!token) return null;
   const result = await pool.query(`
-    SELECT u.id, u.email, u.role, u.is_approved, u.default_location
+    SELECT u.id, u.email, u.role, u.is_approved, u.default_location, u.page_layout
     FROM public.lunch_sessions s
     JOIN public.lunch_users u ON u.id = s.user_id
     WHERE s.token_hash = $1 AND s.expires_at > NOW()
@@ -454,7 +454,29 @@ async function queryMenu(menuDate, userId = null) {
       AND is_available = TRUE
   `, [menuDate]);
 
-  return { items: menu.rows, lastUpdatedAt: meta.rows[0]?.last_updated_at || null };
+  // Every enabled restaurant, so ones without a menu that day still show (as closed).
+  // Same order as the menu: location, then open before closed, favorites first.
+  const sources = await pool.query(`
+    SELECT
+      s.source_id,
+      s.source_name,
+      s.source_location,
+      s.source_url,
+      (fav.source_id IS NOT NULL) AS is_favorite,
+      EXISTS (
+        SELECT 1 FROM public.lunch_menu_items m
+        WHERE m.source_id = s.source_id AND m.menu_date = $2::date AND m.is_available = TRUE
+      ) AS has_menu
+    FROM public.lunch_sources s
+    LEFT JOIN public.lunch_locations loc ON loc.name = s.source_location
+    LEFT JOIN public.lunch_user_location_weights ulw ON ulw.location_name = s.source_location AND ulw.user_id = $1
+    LEFT JOIN public.lunch_user_favorites fav ON fav.source_id = s.source_id AND fav.user_id = $1
+    WHERE s.enabled
+       OR EXISTS (SELECT 1 FROM public.lunch_menu_items m WHERE m.source_id = s.source_id AND m.menu_date = $2::date AND m.is_available = TRUE)
+    ORDER BY COALESCE(ulw.weight, loc.weight, 999), s.source_location, has_menu DESC, (fav.source_id IS NULL), s.source_name
+  `, [userId, menuDate]);
+
+  return { items: menu.rows, sources: sources.rows, lastUpdatedAt: meta.rows[0]?.last_updated_at || null };
 }
 
 // All locations in the user's effective order (personal weight, else global)
@@ -725,33 +747,16 @@ async function updateLocation(form) {
   `, [name, weight]);
 }
 
+async function setPageLayout(userId, form) {
+  const layout = clean(form.page_layout);
+  if (!['listok', 'palcom'].includes(layout)) throw new Error('Neznámy vzhľad.');
+  await pool.query(`UPDATE public.lunch_users SET page_layout = $2, updated_at = NOW() WHERE id = $1`, [userId, layout]);
+}
+
 async function deleteLocation(form) {
   const name = clean(form.name);
   if (!name) throw new Error('Názov lokality je povinný.');
   await pool.query(`DELETE FROM public.lunch_locations WHERE name = $1`, [name]);
-}
-
-function groupByLocationAndSource(items) {
-  return items.reduce((acc, item) => {
-    const location = item.source_location;
-    const source = item.source_name || 'Neznámy zdroj';
-    acc[location] ||= {};
-    acc[location][source] ||= [];
-    acc[location][source].push(item);
-    return acc;
-  }, {});
-}
-
-function categoryClasses(category) {
-  return {
-    soup: { badge: 'bg-orange-100 text-orange-800 dark:bg-orange-950 dark:text-orange-300', text: 'text-orange-800 dark:text-orange-300' },
-    main: { badge: 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300', text: 'text-emerald-800 dark:text-emerald-300' },
-    special: { badge: 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300', text: 'text-amber-800 dark:text-amber-300' },
-    pizza: { badge: 'bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300', text: 'text-red-800 dark:text-red-300' },
-    side: { badge: 'bg-yellow-100 text-yellow-800 dark:bg-yellow-950 dark:text-yellow-300', text: 'text-yellow-800 dark:text-yellow-300' },
-    dessert: { badge: 'bg-pink-100 text-pink-800 dark:bg-pink-950 dark:text-pink-300', text: 'text-pink-800 dark:text-pink-300' },
-    drink: { badge: 'bg-sky-100 text-sky-800 dark:bg-sky-950 dark:text-sky-300', text: 'text-sky-800 dark:text-sky-300' },
-  }[category] || { badge: 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300', text: 'text-slate-700 dark:text-slate-300' };
 }
 
 function plural(n, one, few, many) {
@@ -759,223 +764,110 @@ function plural(n, one, few, many) {
   return n >= 2 && n <= 4 ? few : many;
 }
 
+const capitalize = (text) => `${text.charAt(0).toUpperCase()}${text.slice(1)}`;
+const DATE_OPTS = { timeZone: 'Europe/Bratislava' };
+
+// "Pondelok · 19. 10. 2026"
 function formatHeroDate(value = new Date()) {
-  const opts = { timeZone: 'Europe/Bratislava' };
-  const weekday = new Intl.DateTimeFormat('sk-SK', { ...opts, weekday: 'long' }).format(value);
-  const date = new Intl.DateTimeFormat('sk-SK', { ...opts, day: '2-digit', month: '2-digit', year: 'numeric' }).format(value);
-  return `${weekday.charAt(0).toUpperCase()}${weekday.slice(1)} · ${date}`;
+  const weekday = new Intl.DateTimeFormat('sk-SK', { ...DATE_OPTS, weekday: 'long' }).format(value);
+  const date = new Intl.DateTimeFormat('sk-SK', { ...DATE_OPTS, day: '2-digit', month: '2-digit', year: 'numeric' }).format(value);
+  return `${capitalize(weekday)} · ${date}`;
 }
 
-// Compact variant for narrow screens, e.g. "Pi · 16. 10."
+// "Po 19. 10."
 function formatShortDate(value) {
-  const opts = { timeZone: 'Europe/Bratislava' };
-  const weekday = new Intl.DateTimeFormat('sk-SK', { ...opts, weekday: 'short' }).format(value);
-  const date = new Intl.DateTimeFormat('sk-SK', { ...opts, day: 'numeric', month: 'numeric' }).format(value);
-  return `${weekday.charAt(0).toUpperCase()}${weekday.slice(1)} · ${date}`;
+  const weekday = new Intl.DateTimeFormat('sk-SK', { ...DATE_OPTS, weekday: 'short' }).format(value);
+  const date = new Intl.DateTimeFormat('sk-SK', { ...DATE_OPTS, day: 'numeric', month: 'numeric' }).format(value);
+  return `${capitalize(weekday)} ${date}`;
 }
 
-function cheapestMainPrice(items) {
-  const prices = (category) => items
-    .filter((item) => !category || category.includes(item.category))
-    .map((item) => Number(item.price_eur))
-    .filter((n) => Number.isFinite(n) && n > 0);
-  const mains = prices(['main', 'special', 'pizza']);
-  const any = mains.length ? mains : prices(null);
-  return any.length ? euro(Math.min(...any)).replace(' €', '€') : '—';
+// Cheapest main course (falls back to any dish) with its restaurant
+function cheapestMain(items) {
+  const priced = (categories) => items
+    .filter((item) => !categories || categories.includes(item.category))
+    .filter((item) => Number(item.price_eur) > 0);
+  const pool = priced(['main', 'special', 'pizza']).length ? priced(['main', 'special', 'pizza']) : priced(null);
+  if (!pool.length) return null;
+  const best = pool.reduce((a, b) => (Number(b.price_eur) < Number(a.price_eur) ? b : a));
+  return { price: euro(best.price_eur), source: best.source_name };
 }
 
-const ARROW_SVG = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M7 17 17 7M8 7h9v9"/></svg>';
-
-function renderMenuItem(item, index = 0) {
+// Short marker shown in front of a dish: the restaurant's own code, else P for soup / category initial
+function dishCode(item) {
   const code = clean(item.menu_code);
-  const category = item.category || 'unknown';
-  const label = categoryLabel(category);
-  const cls = categoryClasses(category);
-  const itemAllergens = Array.isArray(item.allergens) ? item.allergens : [];
-  const itemPrice = euro(item.price_eur);
-
-  return `
-    <div class="grid grid-cols-[36px_minmax(0,1fr)_auto] gap-3.5 items-start py-3.5 border-t border-dashed border-line ${index >= 3 ? 'mobile-extra' : ''}">
-      <span class="grid place-items-center w-9 h-9 rounded-full text-sm font-bold ${cls.badge}" aria-hidden="true">${escapeHtml(code || label.charAt(0))}</span>
-      <div class="min-w-0">
-        <div class="text-xs font-bold uppercase tracking-wider ${cls.text}">${code ? `<span class="sr-only">Menu ${escapeHtml(code)}, </span>` : ''}${escapeHtml(label)}</div>
-        <h4 class="m-0 mt-0.5 text-[17px] font-semibold leading-snug">${escapeHtml(item.title)}</h4>
-        ${item.description ? `<p class="m-0 mt-0.5 text-sm text-muted">${escapeHtml(item.description)}</p>` : ''}
-        ${itemAllergens.length ? `<p class="m-0 mt-1 text-xs text-muted">Alergény ${escapeHtml(itemAllergens.join(', '))}</p>` : ''}
-      </div>
-      ${itemPrice ? `<div class="pt-3.5 font-display font-bold text-[19px] whitespace-nowrap">${escapeHtml(itemPrice)}</div>` : '<div></div>'}
-    </div>
-  `;
+  if (code) return code;
+  return item.category === 'soup' ? 'P' : categoryLabel(item.category || 'unknown').charAt(0);
 }
 
-const STAR_SVG = '<svg width="22" height="22" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true" class="fill-none group-aria-pressed:fill-current"><path d="m12 3 2.7 5.6 6.1.8-4.5 4.2 1.1 6.1L12 16.8l-5.4 2.9 1.1-6.1-4.5-4.2 6.1-.8z"/></svg>';
+const ARROW_SVG = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M7 17 17 7M8 7h9v9"/></svg>';
+const STAR_SVG = '<svg width="20" height="20" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="m12 3 2.7 5.6 6.1.8-4.5 4.2 1.1 6.1L12 16.8l-5.4 2.9 1.1-6.1-4.5-4.2 6.1-.8z"/></svg>';
+const CHEVRON_SVG = (d) => `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${d}"/></svg>`;
+const PREV_PATH = 'm15 18-6-6 6-6';
+const NEXT_PATH = 'm9 18 6-6-6-6';
 
+const PAGE_LAYOUTS = {
+  listok: {
+    fonts: 'family=Archivo:wdth,wght@75..125,500..800&family=Atkinson+Hyperlegible:wght@400;700',
+  },
+  palcom: {
+    fonts: 'family=Familjen+Grotesk:wght@500..700&family=Nunito+Sans:opsz,wght@6..12,400..800',
+  },
+};
+
+// Everything both layouts share: data shaping, header controls, modals and page script.
 // auth: { pane, error, notice } opens the login modal on load (after a failed login, registration, …)
 // user / userLocations / flash are only set for logged-in visitors
-function renderPublicPage(items, { menuDate = todayIso(), error = null, lastUpdatedAt = null, user = null, userLocations = [], auth = null, flash = null } = {}) {
+function renderPublicPage(items, { sources = [], menuDate = todayIso(), error = null, lastUpdatedAt = null, user = null, userLocations = [], auth = null, flash = null } = {}) {
+  const layout = user?.page_layout === 'palcom' ? 'palcom' : 'listok';
   const todayDate = todayIso();
   const dayOffset = daysBetween(todayDate, menuDate);
-  const dateHref = (iso) => (iso === todayDate ? '/' : `/?date=${iso}`);
-  const heroDate = formatHeroDate(parseIsoDate(menuDate));
-  const heading = { 0: 'Čo je dnes<br>na obed?', 1: 'Čo bude zajtra<br>na obed?', '-1': 'Čo bolo včera<br>na obed?' }[dayOffset]
-    || (dayOffset > 0 ? 'Čo bude<br>na obed?' : 'Čo bolo<br>na obed?');
   const updatedAt = formatTime(lastUpdatedAt);
-  const updatedLabel = updatedAt === '—' ? 'Zatiaľ bez aktualizácie' : `Aktualizované o ${updatedAt}`;
-  const grouped = groupByLocationAndSource(items);
-  const sourceCount = new Set(items.map((item) => item.source_id)).size;
 
-  // Order comes from the DB query (already sorted by location weight), preserve insertion order
-  const locations = Object.keys(grouped);
-  const locationItemCount = (location) => Object.values(grouped[location]).reduce((sum, rows) => sum + rows.length, 0);
-  // Pre-select the user's default location tab server-side, so there is no flash of "all"
+  // Restaurants in DB order (location weight, open before closed, favorites first), each with
+  // that day's dishes; a restaurant without dishes is shown as closed
+  const dishesBySource = new Map();
+  for (const item of items) {
+    if (!dishesBySource.has(item.source_id)) dishesBySource.set(item.source_id, []);
+    dishesBySource.get(item.source_id).push(item);
+  }
+  const restaurants = sources.map((s) => ({
+    sourceId: s.source_id,
+    name: s.source_name || 'Neznámy zdroj',
+    location: s.source_location,
+    url: s.source_url,
+    favorite: Boolean(s.is_favorite),
+    dishes: dishesBySource.get(s.source_id) || [],
+  }));
+  const openCount = restaurants.filter((r) => r.dishes.length).length;
+  const locations = [...new Set(restaurants.map((r) => r.location))];
+  const locationCount = (location) => restaurants.filter((r) => r.location === location).reduce((sum, r) => sum + r.dishes.length, 0);
+  // Pre-select the user's default location server-side, so there is no flash of "all"
   const activeLocation = user?.default_location && locations.length > 1 && locations.includes(user.default_location) ? user.default_location : 'all';
+  const hiddenAttr = (location) => (activeLocation !== 'all' && activeLocation !== location ? 'hidden' : '');
 
-  const content = locations.map((location) => {
-    const restaurantEntries = Object.entries(grouped[location]);
-    const itemCount = locationItemCount(location);
-    const restaurants = restaurantEntries.map(([sourceName, rows]) => {
-      const sourceUrl = rows.find((row) => row.source_url)?.source_url;
-      const collapsible = rows.length > 3;
-      const favorite = Boolean(rows[0].is_favorite);
-      const favButton = user ? `
-              <form class="fav-form flex-none" method="post" action="/me/favorites/toggle">
-                <input type="hidden" name="source_id" value="${escapeHtml(rows[0].source_id)}">
-                <button type="submit" class="fav-btn group grid place-items-center w-11 h-11 -my-2 rounded-full border-0 bg-transparent text-muted hover:text-accent aria-pressed:text-accent cursor-pointer" aria-pressed="${favorite}" aria-label="${favorite ? 'Odobrať z obľúbených' : 'Pridať do obľúbených'}">${STAR_SVG}</button>
-              </form>` : '';
-      return `
-        <article class="restaurant-card flex flex-col bg-surface border border-line rounded-3xl p-5 sm:p-6 ${collapsible ? 'mobile-collapsible' : ''}">
-          <div class="flex items-center justify-between gap-3 pb-3.5">
-            <div class="flex items-center gap-1 min-w-0">
-              <h3 class="m-0 font-display font-bold text-2xl tracking-tight">${escapeHtml(sourceName)}</h3>${favButton}
-            </div>
-            ${sourceUrl ? `<a class="inline-flex items-center gap-1 min-h-11 text-sm font-semibold text-ink no-underline hover:text-accent flex-none" href="${escapeHtml(sourceUrl)}" target="_blank" rel="noreferrer">Zdroj menu ${ARROW_SVG}</a>` : ''}
-          </div>
-          <div>${rows.map((row, index) => renderMenuItem(row, index)).join('')}</div>
-          ${collapsible ? `<button type="button" class="restaurant-toggle sm:hidden mt-1 min-h-11 w-full rounded-2xl border border-line-strong bg-transparent text-ink text-sm font-semibold cursor-pointer" aria-expanded="false"><span class="toggle-more">Zobraziť všetko (${rows.length})</span><span class="toggle-less">Zobraziť menej</span></button>` : ''}
-        </article>
-      `;
-    }).join('');
+  const ctx = {
+    items, user, menuDate, todayDate, dayOffset, error, flash, restaurants, openCount, locations, locationCount, activeLocation, hiddenAttr,
+    dateHref: (iso) => (iso === todayDate ? '/' : `/?date=${iso}`),
+    updatedLabel: updatedAt === '—' ? 'Zatiaľ bez aktualizácie' : `Aktualizované o ${updatedAt}`,
+    emptyText: dayOffset === 0 ? 'V databáze nie sú položky pre dnešný deň.' : 'Pre tento deň nie sú v databáze žiadne položky.',
+    favButton: (r, cls) => (user ? `
+      <form class="fav-form" method="post" action="/me/favorites/toggle">
+        <input type="hidden" name="source_id" value="${escapeHtml(r.sourceId)}">
+        <button type="submit" class="fav-btn ${cls}" aria-pressed="${r.favorite}" aria-label="${r.favorite ? 'Odobrať z obľúbených' : 'Pridať do obľúbených'}">${STAR_SVG}</button>
+      </form>` : ''),
+    themeButton: (cls) => `
+      <button id="theme-toggle" type="button" aria-label="Prepnúť tmavý režim" class="${cls}">
+        <svg class="dark:hidden" width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+        <svg class="hidden dark:block" width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+      </button>`,
+    initial: user ? escapeHtml(user.email.charAt(0).toUpperCase()) : '',
+    message: (kind, text) => (text ? `<div class="mb-4 px-4 py-3 rounded-xl text-sm font-semibold border ${kind === 'error' ? 'bg-red-50 border-red-200 text-red-800 dark:bg-red-950 dark:border-red-900 dark:text-red-200' : 'bg-green-50 border-green-200 text-green-800 dark:bg-green-950 dark:border-green-900 dark:text-green-200'}">${escapeHtml(text)}</div>` : ''),
+  };
 
-    return `
-      <section class="location-section pb-10" data-location="${escapeHtml(location)}" ${activeLocation !== 'all' && activeLocation !== location ? 'hidden' : ''}>
-        <div class="flex flex-wrap items-baseline gap-x-3 gap-y-1 mb-4">
-          <span class="w-2.5 h-2.5 rounded-full bg-accent self-center flex-none"></span>
-          <h2 class="m-0 font-display font-bold text-3xl tracking-tight">${escapeHtml(location)}</h2>
-          <span class="text-sm text-muted">${restaurantEntries.length} ${plural(restaurantEntries.length, 'reštaurácia', 'reštaurácie', 'reštaurácií')} · ${itemCount} ${plural(itemCount, 'jedlo', 'jedlá', 'jedál')}</span>
-        </div>
-        <div class="grid gap-4 grid-cols-[repeat(auto-fit,minmax(min(100%,420px),1fr))]">${restaurants}</div>
-      </section>
-    `;
-  }).join('');
-
-  const tabClass = 'location-tab inline-flex items-center gap-2 h-11 px-4.5 rounded-full border text-[15px] font-semibold cursor-pointer bg-surface text-ink border-line-strong hover:border-ink aria-pressed:bg-ink aria-pressed:text-ground aria-pressed:border-ink';
-  const tabs = locations.length > 1 ? [
-    `<button type="button" class="${tabClass}" data-location="all" aria-pressed="${activeLocation === 'all'}">Všetky lokality <span class="text-[13px] opacity-70">${items.length}</span></button>`,
-    ...locations.map((location) => `<button type="button" class="${tabClass}" data-location="${escapeHtml(location)}" aria-pressed="${activeLocation === location}">${escapeHtml(location)} <span class="text-[13px] opacity-70">${locationItemCount(location)}</span></button>`),
-  ].join('') : '';
-
-  const statTile = (value, label) => `
-    <div class="bg-surface border border-line rounded-[18px] p-3.5 sm:p-4">
-      <div class="font-display font-extrabold text-[28px] sm:text-[34px] leading-none">${escapeHtml(value)}</div>
-      <div class="mt-1.5 text-[13px] font-semibold text-muted">${escapeHtml(label)}</div>
-    </div>`;
-
-  const notice = (title, text) => `<div class="bg-surface border border-line rounded-3xl p-6 mb-10"><h2 class="m-0 font-display font-bold text-2xl tracking-tight">${escapeHtml(title)}</h2><p class="m-0 mt-2 text-muted">${escapeHtml(text)}</p></div>`;
-  const message = (kind, text) => text ? `<div class="mb-4 px-4 py-3 rounded-xl text-sm font-semibold border ${kind === 'error' ? 'bg-red-50 border-red-200 text-red-800 dark:bg-red-950 dark:border-red-900 dark:text-red-200' : 'bg-green-50 border-green-200 text-green-800 dark:bg-green-950 dark:border-green-900 dark:text-green-200'}">${escapeHtml(text)}</div>` : '';
-  const inputClass = 'mt-1 w-full border border-line-strong rounded-xl px-4 py-3 text-base bg-ground text-ink focus:outline-none focus:ring-2 focus:ring-accent';
-  const labelClass = 'block text-xs font-bold text-muted uppercase tracking-wide';
-  const paneBtnClass = 'auth-pane-btn h-10 px-4 rounded-full text-sm font-semibold border cursor-pointer bg-surface text-muted border-line-strong aria-pressed:bg-ink aria-pressed:text-ground aria-pressed:border-ink';
-  const dateNavBtnClass = 'grid place-items-center w-11 h-11 rounded-full border border-line-strong bg-surface text-ink no-underline hover:border-ink';
-  const headerBtnClass = 'inline-flex items-center gap-2 h-11 px-3.5 sm:px-4.5 rounded-xl text-[15px] font-semibold cursor-pointer no-underline';
-  const closeButton = (id) => `
-      <button id="${id}" type="button" aria-label="Zavrieť" class="absolute top-4 right-4 grid place-items-center w-10 h-10 rounded-full bg-ground text-muted hover:text-ink cursor-pointer border-0">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>
-      </button>`;
-  const authPane = auth?.pane === 'register' ? 'register' : 'login';
-
-  const headerActions = user ? `
-        ${user.role === 'admin' ? `<a href="/admin" class="${headerBtnClass} border border-line-strong bg-surface text-ink hover:border-ink">Admin</a>` : ''}
-        <button id="prefs-open" type="button" class="${headerBtnClass} border border-line-strong bg-surface text-ink hover:border-ink" aria-label="Môj výber (${escapeHtml(user.email)})">
-          <span class="grid place-items-center w-6 h-6 rounded-full bg-accent text-white text-xs font-bold uppercase" aria-hidden="true">${escapeHtml(user.email.charAt(0))}</span>
-          <span class="hidden sm:inline">Môj výber</span>
-        </button>` : `
-        <button id="login-open" type="button" class="${headerBtnClass} border-0 bg-ink text-ground hover:opacity-90">Prihlásiť sa</button>`;
-
-  const loginModal = user ? '' : `
-  <div id="login-modal" class="fixed inset-0 z-50 ${auth ? 'flex' : 'hidden'} items-center justify-center bg-black/60 p-4">
-    <div role="dialog" aria-modal="true" aria-label="Prihlásenie" class="w-full max-w-md bg-surface text-ink border border-line rounded-3xl shadow-2xl p-6 relative">
-      ${closeButton('login-close')}
-
-      <div class="flex gap-2 mb-5">
-        <button type="button" class="${paneBtnClass}" data-pane="login" aria-pressed="${authPane === 'login'}">Prihlásenie</button>
-        <button type="button" class="${paneBtnClass}" data-pane="register" aria-pressed="${authPane === 'register'}">Registrácia</button>
-      </div>
-
-      ${message('error', auth?.error)}
-      ${message('notice', auth?.notice)}
-
-      <form id="pane-login" method="post" action="/admin/login" class="${authPane === 'login' ? '' : 'hidden'} grid gap-3">
-        <label class="block"><span class="${labelClass}">E-mail</span><input type="email" name="email" required autocomplete="username" class="${inputClass}"></label>
-        <label class="block"><span class="${labelClass}">Heslo</span><input type="password" name="password" required autocomplete="current-password" class="${inputClass}"></label>
-        <button type="submit" class="mt-1 w-full px-4 py-3 bg-ink text-ground font-bold rounded-xl cursor-pointer border-0 hover:opacity-90">Prihlásiť</button>
-        <a href="/admin?view=reset" class="text-sm font-semibold text-muted hover:text-ink no-underline justify-self-start">Zabudnuté heslo?</a>
-      </form>
-
-      <form id="pane-register" method="post" action="/admin/register" class="${authPane === 'register' ? '' : 'hidden'} grid gap-3">
-        <p class="m-0 text-sm text-muted">Nový účet musí schváliť admin. Úplne prvý zaregistrovaný účet sa stáva adminom.</p>
-        <label class="block"><span class="${labelClass}">E-mail</span><input type="email" name="email" required autocomplete="username" class="${inputClass}"></label>
-        <label class="block"><span class="${labelClass}">Heslo (min. 8 znakov)</span><input type="password" name="password" required minlength="8" autocomplete="new-password" class="${inputClass}"></label>
-        <label class="block"><span class="${labelClass}">Heslo znova</span><input type="password" name="password_confirm" required minlength="8" autocomplete="new-password" class="${inputClass}"></label>
-        <button type="submit" class="mt-1 w-full px-4 py-3 bg-ink text-ground font-bold rounded-xl cursor-pointer border-0 hover:opacity-90">Registrovať</button>
-      </form>
-    </div>
-  </div>`;
-
-  const moveBtnClass = 'move-btn grid place-items-center w-11 h-11 rounded-lg border border-line-strong bg-surface text-ink cursor-pointer hover:border-ink disabled:opacity-30 disabled:cursor-default';
-  const prefsModal = !user ? '' : `
-  <div id="prefs-modal" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/60 p-4">
-    <div role="dialog" aria-modal="true" aria-label="Môj výber" class="w-full max-w-md max-h-full overflow-y-auto bg-surface text-ink border border-line rounded-3xl shadow-2xl p-6 relative">
-      ${closeButton('prefs-close')}
-      <h2 class="m-0 font-display font-bold text-2xl tracking-tight">Môj výber</h2>
-      <p class="m-0 mt-1 mb-5 text-sm text-muted break-all">${escapeHtml(user.email)}</p>
-
-      <form method="post" action="/me/preferences" class="grid gap-5">
-        <input type="hidden" name="date" value="${escapeHtml(menuDate)}">
-        <label class="block"><span class="${labelClass}">Predvolená lokalita</span>
-          <select name="default_location" class="${inputClass}">
-            <option value="">Všetky lokality</option>
-            ${userLocations.map((name) => `<option value="${escapeHtml(name)}" ${name === user.default_location ? 'selected' : ''}>${escapeHtml(name)}</option>`).join('')}
-          </select>
-        </label>
-
-        <div>
-          <span class="${labelClass}">Poradie lokalít</span>
-          <ol id="order-list" class="m-0 mt-1 p-0 list-none grid gap-2">
-            ${userLocations.map((name) => `
-            <li class="order-item flex items-center gap-2 border border-line rounded-xl pl-4 pr-1.5 py-1.5">
-              <input type="hidden" name="order" value="${escapeHtml(name)}">
-              <span class="flex-1 font-semibold min-w-0 truncate">${escapeHtml(name)}</span>
-              <button type="button" class="${moveBtnClass}" data-move="-1" aria-label="Posunúť ${escapeHtml(name)} vyššie">↑</button>
-              <button type="button" class="${moveBtnClass}" data-move="1" aria-label="Posunúť ${escapeHtml(name)} nižšie">↓</button>
-            </li>`).join('')}
-          </ol>
-          <p class="m-0 mt-2 text-xs text-muted">Obľúbené reštaurácie označíš hviezdičkou, zobrazia sa navrchu svojej lokality.</p>
-        </div>
-
-        <div class="flex flex-wrap gap-2">
-          <button type="submit" name="action" value="save" class="flex-1 px-4 py-3 bg-ink text-ground font-bold rounded-xl cursor-pointer border-0 hover:opacity-90">Uložiť</button>
-          <button type="submit" name="action" value="reset_order" class="px-4 py-3 bg-transparent text-ink font-semibold rounded-xl cursor-pointer border border-line-strong hover:border-ink">Predvolené poradie</button>
-        </div>
-      </form>
-
-      <div class="flex justify-end mt-5 pt-4 border-t border-line">
-        <a href="/logout" class="text-sm font-semibold text-muted hover:text-ink no-underline">Odhlásiť sa</a>
-      </div>
-    </div>
-  </div>`;
+  const body = layout === 'palcom' ? renderPalcomLayout(ctx) : renderListokLayout(ctx);
 
   return `<!doctype html>
-<html lang="sk">
+<html lang="sk" class="layout-${layout}">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
@@ -983,7 +875,7 @@ function renderPublicPage(items, { menuDate = todayIso(), error = null, lastUpda
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,700;12..96,800&family=Figtree:wght@400;500;600;700&display=swap">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?${PAGE_LAYOUTS[layout].fonts}&display=swap">
   <link rel="stylesheet" href="${TAILWIND_URL}">
   <script>
     (function () {
@@ -994,96 +886,32 @@ function renderPublicPage(items, { menuDate = todayIso(), error = null, lastUpda
       }
     })();
   </script>
-  <style>
-    @media (max-width: 639px) {
-      .mobile-collapsible:not(.expanded) .mobile-extra { display: none; }
-    }
-    .restaurant-card .toggle-less, .restaurant-card.expanded .toggle-more { display: none; }
-    .restaurant-card.expanded .toggle-less { display: inline; }
-  </style>
 </head>
-<body class="min-h-screen bg-ground text-ink font-body antialiased">
-  <div class="max-w-[1160px] mx-auto px-4">
-
-    <header class="flex items-center justify-between gap-3 py-5">
-      <div class="flex items-center gap-2.5 sm:gap-3 min-w-0">
-        <svg width="40" height="40" viewBox="0 0 40 40" fill="none" aria-hidden="true" class="flex-none"><rect width="40" height="40" rx="12" class="fill-ink"/><circle cx="20" cy="21" r="10" stroke-width="2.4" class="stroke-ground"/><path d="M15 12c2-2 8-2 10 0" stroke-width="2.4" stroke-linecap="round" class="stroke-accent"/></svg>
-        <span class="font-display font-bold text-lg sm:text-xl tracking-tight truncate">${escapeHtml(SITE_TITLE)}</span>
-      </div>
-      <div class="flex items-center gap-2 flex-none">
-        <button id="theme-toggle" type="button" aria-label="Prepnúť tmavý režim" class="grid place-items-center w-11 h-11 rounded-xl border border-line-strong bg-surface text-ink cursor-pointer hover:border-ink">
-          <svg class="dark:hidden" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
-          <svg class="hidden dark:block" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
-        </button>${headerActions}
-      </div>
-    </header>
-
-    ${flash ? `<div class="pt-2">${message(flash.kind, flash.text)}</div>` : ''}
-
-    <section class="flex flex-wrap items-end justify-between gap-8 pt-6 sm:pt-10 pb-8">
-      <div class="flex-[1_1_520px] min-w-0">
-        <nav aria-label="Výber dňa" class="flex flex-wrap items-center gap-1.5 mb-3.5">
-          <a href="${dateHref(shiftIsoDate(menuDate, -1))}" aria-label="Predchádzajúci deň" class="${dateNavBtnClass}"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg></a>
-          <!-- Transparent native date input over the label: tapping opens the OS date picker -->
-          <div class="relative rounded-full focus-within:ring-2 focus-within:ring-accent">
-            <span class="inline-flex items-center gap-2 h-11 px-4 rounded-full border border-line-strong bg-surface text-[15px] font-semibold whitespace-nowrap">
-              <span class="hidden sm:inline">${escapeHtml(heroDate)}</span><span class="sm:hidden">${escapeHtml(formatShortDate(parseIsoDate(menuDate)))}</span>
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true" class="text-muted"><rect x="3" y="5" width="18" height="16" rx="3"/><path d="M3 10h18M8 3v4M16 3v4"/></svg>
-            </span>
-            <input id="date-input" type="date" value="${escapeHtml(menuDate)}" aria-label="Vybrať dátum" class="absolute inset-0 w-full h-full opacity-0 cursor-pointer">
-          </div>
-          <a href="${dateHref(shiftIsoDate(menuDate, 1))}" aria-label="Nasledujúci deň" class="${dateNavBtnClass}"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg></a>
-          ${dayOffset !== 0 ? '<a href="/" class="inline-flex items-center h-11 px-4 rounded-full bg-ink text-ground text-[15px] font-semibold no-underline hover:opacity-90">Dnes</a>' : ''}
-        </nav>
-        <h1 class="m-0 font-display font-extrabold text-[clamp(44px,7vw,88px)] leading-[0.95] tracking-[-0.035em]">${heading}</h1>
-      </div>
-      <div class="flex-[0_1_400px] grid grid-cols-3 gap-2.5">
-        ${statTile(String(items.length), plural(items.length, 'jedlo', 'jedlá', 'jedál'))}
-        ${statTile(String(sourceCount), plural(sourceCount, 'reštaurácia', 'reštaurácie', 'reštaurácií'))}
-        ${statTile(cheapestMainPrice(items), 'najlacnejšie')}
-      </div>
-    </section>
-
-    <nav aria-label="Lokality" class="flex flex-wrap items-center gap-2 pt-3.5 pb-7 border-t border-line">
-      ${tabs}
-      <span class="ml-auto text-sm text-muted">${escapeHtml(updatedLabel)}</span>
-    </nav>
-
-    <main>
-      ${error ? notice('Menu sa nepodarilo načítať', error) : ''}
-      ${!error && items.length === 0 ? notice('Zatiaľ tu nie je menu', dayOffset === 0 ? 'V databáze nie sú položky pre dnešný deň.' : 'Pre tento deň nie sú v databáze žiadne položky.') : ''}
-      ${!error ? content : ''}
-    </main>
-
-    <footer class="flex flex-wrap justify-between gap-2 py-6 pb-10 border-t border-line text-[13px] text-muted">
-      <span>${escapeHtml(SITE_TITLE)}</span>
-      <span>n8n · PostgreSQL · Docker · Raspberry Pi</span>
-    </footer>
-  </div>
-${loginModal}${prefsModal}
+<body class="font-body antialiased">
+${body}
+${renderLoginModal(user, auth, ctx.message)}${renderPrefsModal(user, userLocations, menuDate)}
   <script>
-    document.querySelectorAll('.restaurant-toggle').forEach((button) => {
-      button.addEventListener('click', () => {
-        const expanded = button.closest('.restaurant-card').classList.toggle('expanded');
-        button.setAttribute('aria-expanded', expanded ? 'true' : 'false');
-      });
-    });
-
-    const locationTabs = document.querySelectorAll('.location-tab');
-    locationTabs.forEach((tab) => {
-      tab.addEventListener('click', () => {
-        const location = tab.dataset.location;
-        locationTabs.forEach((t) => t.setAttribute('aria-pressed', t === tab ? 'true' : 'false'));
-        document.querySelectorAll('.location-section').forEach((section) => {
-          section.hidden = location !== 'all' && section.dataset.location !== location;
-        });
-      });
-    });
-
     document.getElementById('theme-toggle').addEventListener('click', () => {
       const dark = document.documentElement.classList.toggle('dark');
       try { localStorage.setItem('lunch_theme', dark ? 'dark' : 'light'); } catch {}
     });
+
+    // Location filter: buttons carry data-location, filtered blocks carry data-loc-item
+    const locButtons = document.querySelectorAll('.loc-filter');
+    locButtons.forEach((button) => button.addEventListener('click', () => {
+      const location = button.dataset.location;
+      locButtons.forEach((b) => b.setAttribute('aria-pressed', b === button ? 'true' : 'false'));
+      document.querySelectorAll('[data-loc-item]').forEach((el) => {
+        el.hidden = location !== 'all' && el.dataset.location !== location;
+      });
+    }));
+
+    // Collapsible restaurants (Palcom layout)
+    document.querySelectorAll('.acc-toggle').forEach((button) => button.addEventListener('click', () => {
+      const open = button.getAttribute('aria-expanded') !== 'true';
+      button.setAttribute('aria-expanded', open ? 'true' : 'false');
+      document.getElementById(button.getAttribute('aria-controls')).hidden = !open;
+    }));
 
     // Shared modal wiring for the login and "Môj výber" dialogs
     const modals = [];
@@ -1117,11 +945,13 @@ ${loginModal}${prefsModal}
     history.replaceState(null, '', location.pathname + (params.size ? '?' + params : ''));
 
     const dateInput = document.getElementById('date-input');
-    // Desktop browsers only open the picker from the icon; open it on any click
-    dateInput.addEventListener('click', () => { try { dateInput.showPicker(); } catch {} });
-    dateInput.addEventListener('change', () => {
-      if (dateInput.value) location.href = dateInput.value === ${JSON.stringify(todayDate)} ? '/' : '/?date=' + dateInput.value;
-    });
+    if (dateInput) {
+      // Desktop browsers only open the picker from the icon; open it on any click
+      dateInput.addEventListener('click', () => { try { dateInput.showPicker(); } catch {} });
+      dateInput.addEventListener('change', () => {
+        if (dateInput.value) location.href = dateInput.value === ${JSON.stringify(todayDate)} ? '/' : '/?date=' + dateInput.value;
+      });
+    }
 
     // Favorites: toggle in place via fetch; fall back to a normal form post
     document.querySelectorAll('.fav-form').forEach((form) => {
@@ -1164,6 +994,288 @@ ${loginModal}${prefsModal}
   </script>
 </body>
 </html>`;
+}
+
+// Layout A "Týždenný lístok": sticky week strip + location chips, dense printed-menu list
+function renderListokLayout(ctx) {
+  const { user, menuDate, todayDate, dayOffset, restaurants, locations, locationCount, activeLocation, hiddenAttr, dateHref } = ctx;
+  const selected = parseIsoDate(menuDate);
+  const monday = shiftIsoDate(menuDate, -((selected.getUTCDay() + 6) % 7));
+  const weekdayShort = (iso) => new Intl.DateTimeFormat('sk-SK', { ...DATE_OPTS, weekday: 'short' }).format(parseIsoDate(iso));
+
+  const week = [0, 1, 2, 3, 4, 5, 6].map((i) => {
+    const iso = shiftIsoDate(monday, i);
+    const current = iso === menuDate;
+    return `<a href="${dateHref(iso)}" class="l-day ${i >= 5 ? 'l-day-weekend' : ''}" ${current ? 'aria-current="date"' : ''} aria-label="${escapeHtml(formatHeroDate(parseIsoDate(iso)))}">
+          <span>${iso === todayDate ? 'Dnes' : escapeHtml(weekdayShort(iso))}</span><strong>${parseIsoDate(iso).getUTCDate()}</strong></a>`;
+  }).join('');
+
+  const chips = locations.length > 1 ? `
+      <div class="l-locs" role="group" aria-label="Lokalita">
+        <button type="button" class="loc-filter l-loc" data-location="all" aria-pressed="${activeLocation === 'all'}">Všetko<small>${ctx.items.length}</small></button>
+        ${locations.map((location) => `<button type="button" class="loc-filter l-loc" data-location="${escapeHtml(location)}" aria-pressed="${activeLocation === location}">${escapeHtml(location)}<small>${locationCount(location)}</small></button>`).join('')}
+      </div>` : '';
+
+  const relative = { 0: 'dnes', 1: 'zajtra', '-1': 'včera' }[dayOffset];
+  const cheapest = cheapestMain(ctx.items);
+
+  const list = restaurants.map((r) => `
+    <section class="l-rest ${r.dishes.length ? '' : 'l-rest-closed'}" data-loc-item data-location="${escapeHtml(r.location)}" ${hiddenAttr(r.location)}>
+      <div class="l-rest-head">
+        <h2>${escapeHtml(r.name)}${r.favorite ? ' <span class="l-fav-tag">★ obľúbená</span>' : ''}</h2>
+        ${r.url ? `<a class="l-where" href="${escapeHtml(r.url)}" target="_blank" rel="noreferrer" aria-label="Zdroj menu ${escapeHtml(r.name)}">${escapeHtml(r.location)} ${ARROW_SVG}</a>` : `<span class="l-where">${escapeHtml(r.location)}</span>`}
+        ${ctx.favButton(r, 'l-star')}
+      </div>
+      <ul class="l-dishes">
+        ${r.dishes.length ? '' : '<li class="l-dish"><span class="l-code">–</span><span class="l-name">Zatvorené<small>V tento deň bez obedového menu</small></span><span></span></li>'}
+        ${r.dishes.map((d) => {
+          const allergens = Array.isArray(d.allergens) ? d.allergens : [];
+          const details = [d.description, allergens.length ? `Alergény ${allergens.join(', ')}` : ''].filter(Boolean).join(' · ');
+          const price = Number(d.price_eur) > 0 ? Number(d.price_eur).toFixed(2).replace('.', ',') : '';
+          return `<li class="l-dish">
+          <span class="l-code" title="${escapeHtml(categoryLabel(d.category))}">${escapeHtml(dishCode(d))}</span>
+          <span class="l-name">${escapeHtml(d.title)}${details ? `<small>${escapeHtml(details)}</small>` : ''}</span>
+          <span class="l-price">${price ? `${price}<em>€</em>` : ''}</span>
+        </li>`;
+        }).join('')}
+      </ul>
+    </section>`).join('');
+
+  return `
+  <header class="l-top">
+    <div class="l-wrap l-top-inner">
+      <div class="l-bar">
+        <span class="l-logo">${escapeHtml(SITE_TITLE)}</span>
+        <div class="l-actions">
+          ${ctx.themeButton('l-icon-btn')}
+          ${user?.role === 'admin' ? '<a href="/admin" class="l-btn">Admin</a>' : ''}
+          ${user
+            ? `<button id="prefs-open" type="button" class="l-icon-btn l-avatar" aria-label="Môj výber (${escapeHtml(user.email)})">${ctx.initial}</button>`
+            : '<button id="login-open" type="button" class="l-btn l-btn-primary">Prihlásiť</button>'}
+        </div>
+      </div>
+      <nav class="l-week" aria-label="Deň v týždni">
+        <a href="${dateHref(shiftIsoDate(menuDate, -7))}" class="l-arrow" aria-label="Predchádzajúci týždeň">${CHEVRON_SVG(PREV_PATH)}</a>
+        ${week}
+        <a href="${dateHref(shiftIsoDate(menuDate, 7))}" class="l-arrow" aria-label="Nasledujúci týždeň">${CHEVRON_SVG(NEXT_PATH)}</a>
+      </nav>
+      ${chips}
+    </div>
+  </header>
+
+  <main class="l-wrap">
+    ${ctx.flash ? `<div class="l-pad">${ctx.message(ctx.flash.kind, ctx.flash.text)}</div>` : ''}
+    <div class="l-summary">
+      <span><strong>${escapeHtml(formatHeroDate(selected))}</strong>${relative ? ` · ${relative}` : ''}</span>
+      ${cheapest ? `<span>Najlacnejšie hlavné <strong>${escapeHtml(cheapest.price)} · ${escapeHtml(cheapest.source)}</strong></span>` : ''}
+    </div>
+    ${ctx.error ? `<p class="l-empty"><strong>Menu sa nepodarilo načítať.</strong> ${escapeHtml(ctx.error)}</p>` : ''}
+    ${!ctx.error && !ctx.openCount ? `<p class="l-empty"><strong>Zatiaľ tu nie je menu.</strong> ${escapeHtml(ctx.emptyText)}</p>` : ''}
+    ${!ctx.error ? list : ''}
+    <p class="l-foot">${escapeHtml(ctx.updatedLabel)} · ${escapeHtml(SITE_TITLE)}</p>
+  </main>`;
+}
+
+// Layout B "Palcom": favorites as swipe cards, collapsed restaurants, date dock at the bottom
+function renderPalcomLayout(ctx) {
+  const { user, menuDate, dayOffset, restaurants, locations, activeLocation, hiddenAttr, dateHref } = ctx;
+  const selected = parseIsoDate(menuDate);
+  const heading = { 0: 'Čo je dnes na obed?', 1: 'Čo bude zajtra na obed?', '-1': 'Čo bolo včera na obed?' }[dayOffset]
+    || (dayOffset > 0 ? 'Čo bude na obed?' : 'Čo bolo na obed?');
+  const dockLabel = { 0: 'Dnes', 1: 'Zajtra', '-1': 'Včera' }[dayOffset]
+    || capitalize(new Intl.DateTimeFormat('sk-SK', { ...DATE_OPTS, weekday: 'long' }).format(selected));
+  const priceOf = (d) => (Number(d.price_eur) > 0 ? euro(d.price_eur) : '');
+  const badge = (d) => (d.category === 'soup' ? 'Polievka' : clean(d.menu_code) || categoryLabel(d.category || 'unknown'));
+
+  const segs = locations.length > 1 ? `
+      <div class="p-segs" role="group" aria-label="Lokalita">
+        <button type="button" class="loc-filter p-seg" data-location="all" aria-pressed="${activeLocation === 'all'}">Všetko</button>
+        ${locations.map((location) => `<button type="button" class="loc-filter p-seg" data-location="${escapeHtml(location)}" aria-pressed="${activeLocation === location}">${escapeHtml(location)}</button>`).join('')}
+      </div>` : '';
+
+  const favorites = restaurants.filter((r) => r.favorite);
+  const cards = favorites.length ? `
+    <div class="p-label"><span>Tvoje obľúbené</span><span>${favorites.length}</span></div>
+    <div class="p-favs">
+      ${favorites.map((r, i) => `
+      <article class="p-card ${i || !r.dishes.length ? 'p-card-alt' : ''}" data-loc-item data-location="${escapeHtml(r.location)}" ${hiddenAttr(r.location)}>
+        <div class="p-card-top"><div><h3>${escapeHtml(r.name)}</h3><span class="p-where">${escapeHtml(r.location)}${r.dishes.length ? ` · ${r.dishes.length} ${plural(r.dishes.length, 'jedlo', 'jedlá', 'jedál')}` : ''}</span></div><span class="p-card-star" aria-hidden="true">★</span></div>
+        ${r.dishes.length ? '' : '<p class="p-closed-note">Zatvorené · v tento deň bez menu</p>'}
+        <ul>
+          ${r.dishes.slice(0, 3).map((d) => `<li><span>${escapeHtml(d.title)}</span><b>${escapeHtml(priceOf(d))}</b></li>`).join('')}
+        </ul>
+        ${r.dishes.length > 3 ? `<span class="p-more">+ ${r.dishes.length - 3} ${plural(r.dishes.length - 3, 'ďalšie', 'ďalšie', 'ďalších')}</span>` : ''}
+      </article>`).join('')}
+    </div>` : '';
+
+  // With a favorites strip everything below starts collapsed; otherwise open the first restaurant
+  const firstOpen = restaurants.findIndex((r) => r.dishes.length);
+  const accordions = restaurants.map((r, i) => {
+    if (!r.dishes.length) {
+      return `
+      <div class="p-acc p-acc-closed" data-loc-item data-location="${escapeHtml(r.location)}" ${hiddenAttr(r.location)}>
+        <div class="p-acc-row">
+          <div class="p-acc-btn">
+            <h3>${escapeHtml(r.name)}</h3>
+            <span class="p-meta">${escapeHtml(r.location)} · zatvorené</span>
+          </div>
+          ${ctx.favButton(r, 'p-star')}
+        </div>
+      </div>`;
+    }
+    const open = !favorites.length && i === firstOpen;
+    const prices = r.dishes.map((d) => Number(d.price_eur)).filter((n) => n > 0);
+    const id = `acc-${i}`;
+    return `
+      <div class="p-acc" data-loc-item data-location="${escapeHtml(r.location)}" ${hiddenAttr(r.location)}>
+        <div class="p-acc-row">
+          <button type="button" class="acc-toggle p-acc-btn" aria-expanded="${open}" aria-controls="${id}">
+            <h3>${escapeHtml(r.name)}</h3>
+            <span class="p-meta">${escapeHtml(r.location)} · ${r.dishes.length} ${plural(r.dishes.length, 'jedlo', 'jedlá', 'jedál')}${prices.length ? ` · od <b>${escapeHtml(euro(Math.min(...prices)))}</b>` : ''}</span>
+            <span class="p-chev" aria-hidden="true">${CHEVRON_SVG('m6 9 6 6 6-6')}</span>
+          </button>
+          ${ctx.favButton(r, 'p-star')}
+        </div>
+        <div class="p-acc-body" id="${id}" ${open ? '' : 'hidden'}>
+          ${r.dishes.map((d) => {
+            const allergens = Array.isArray(d.allergens) ? d.allergens : [];
+            return `<div class="p-dish"><span class="p-cat">${escapeHtml(badge(d))}</span><span>${escapeHtml(d.title)}${allergens.length ? `<small>Alergény ${escapeHtml(allergens.join(', '))}</small>` : ''}</span><b>${escapeHtml(priceOf(d))}</b></div>`;
+          }).join('')}
+          ${r.url ? `<a class="p-source" href="${escapeHtml(r.url)}" target="_blank" rel="noreferrer">Zdroj menu ${ARROW_SVG}</a>` : ''}
+        </div>
+      </div>`;
+  }).join('');
+
+  return `
+  <div class="p-page">
+    <header class="p-head">
+      <div class="p-row">
+        <span class="p-brand"><i aria-hidden="true"></i>${escapeHtml(SITE_TITLE)}</span>
+        <div class="p-actions">
+          ${ctx.themeButton('p-icon-btn')}
+          ${user?.role === 'admin' ? '<a href="/admin" class="p-pill">Admin</a>' : ''}
+          ${user
+            ? `<button id="prefs-open" type="button" class="p-pill p-me" aria-label="Môj výber (${escapeHtml(user.email)})"><span>${ctx.initial}</span><em class="p-me-label">Môj výber</em></button>`
+            : '<button id="login-open" type="button" class="p-pill p-pill-primary">Prihlásiť</button>'}
+        </div>
+      </div>
+      <h1 class="p-title"><small>${escapeHtml(formatHeroDate(selected))}</small>${heading}</h1>
+      ${segs}
+    </header>
+
+    <main>
+      ${ctx.flash ? `<div class="p-pad">${ctx.message(ctx.flash.kind, ctx.flash.text)}</div>` : ''}
+      ${ctx.error ? `<p class="p-empty"><strong>Menu sa nepodarilo načítať.</strong> ${escapeHtml(ctx.error)}</p>` : ''}
+      ${!ctx.error && !ctx.openCount ? `<p class="p-empty"><strong>Zatiaľ tu nie je menu.</strong> ${escapeHtml(ctx.emptyText)}</p>` : ''}
+      ${!ctx.error ? cards : ''}
+      ${!ctx.error && restaurants.length ? `<div class="p-label"><span>Všetky reštaurácie</span><span>${restaurants.length}</span></div><div class="p-list">${accordions}</div>` : ''}
+      <p class="p-foot">${escapeHtml(ctx.updatedLabel)}</p>
+    </main>
+
+    <div class="p-spacer"></div>
+    <nav class="p-dock" aria-label="Výber dňa">
+      <div class="p-dock-inner">
+        <a href="${dateHref(shiftIsoDate(menuDate, -1))}" aria-label="Predchádzajúci deň">${CHEVRON_SVG(PREV_PATH)}</a>
+        <!-- Transparent native date input over the label: tapping opens the OS date picker -->
+        <div class="p-date">
+          <strong>${escapeHtml(dockLabel)}</strong><small>${escapeHtml(formatShortDate(selected))}</small>
+          <input id="date-input" type="date" value="${escapeHtml(menuDate)}" aria-label="Vybrať dátum">
+        </div>
+        <a href="${dateHref(shiftIsoDate(menuDate, 1))}" aria-label="Nasledujúci deň">${CHEVRON_SVG(NEXT_PATH)}</a>
+      </div>
+    </nav>
+  </div>`;
+}
+
+const MODAL = {
+  input: 'mt-1 w-full border border-line-strong rounded-xl px-4 py-3 text-base bg-ground text-ink focus:outline-none focus:ring-2 focus:ring-accent',
+  label: 'block text-xs font-bold text-muted uppercase tracking-wide',
+  pane: 'auth-pane-btn h-10 px-4 rounded-full text-sm font-semibold border cursor-pointer bg-surface text-muted border-line-strong aria-pressed:bg-ink aria-pressed:text-surface aria-pressed:border-ink',
+  primary: 'w-full px-4 py-3 bg-ink text-surface font-bold rounded-xl cursor-pointer border-0 hover:opacity-90',
+  close: (id) => `
+      <button id="${id}" type="button" aria-label="Zavrieť" class="absolute top-4 right-4 grid place-items-center w-10 h-10 rounded-full bg-ground text-muted hover:text-ink cursor-pointer border-0">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>
+      </button>`,
+};
+
+function renderLoginModal(user, auth, message) {
+  if (user) return '';
+  const pane = auth?.pane === 'register' ? 'register' : 'login';
+  return `
+  <div id="login-modal" class="fixed inset-0 z-50 ${auth ? 'flex' : 'hidden'} items-center justify-center bg-black/60 p-4">
+    <div role="dialog" aria-modal="true" aria-label="Prihlásenie" class="w-full max-w-md bg-surface text-ink border border-line rounded-3xl shadow-2xl p-6 relative">
+      ${MODAL.close('login-close')}
+
+      <div class="flex gap-2 mb-5">
+        <button type="button" class="${MODAL.pane}" data-pane="login" aria-pressed="${pane === 'login'}">Prihlásenie</button>
+        <button type="button" class="${MODAL.pane}" data-pane="register" aria-pressed="${pane === 'register'}">Registrácia</button>
+      </div>
+
+      ${message('error', auth?.error)}
+      ${message('notice', auth?.notice)}
+
+      <form id="pane-login" method="post" action="/admin/login" class="${pane === 'login' ? '' : 'hidden'} grid gap-3">
+        <label class="block"><span class="${MODAL.label}">E-mail</span><input type="email" name="email" required autocomplete="username" class="${MODAL.input}"></label>
+        <label class="block"><span class="${MODAL.label}">Heslo</span><input type="password" name="password" required autocomplete="current-password" class="${MODAL.input}"></label>
+        <button type="submit" class="mt-1 ${MODAL.primary}">Prihlásiť</button>
+        <a href="/admin?view=reset" class="text-sm font-semibold text-muted hover:text-ink no-underline justify-self-start">Zabudnuté heslo?</a>
+      </form>
+
+      <form id="pane-register" method="post" action="/admin/register" class="${pane === 'register' ? '' : 'hidden'} grid gap-3">
+        <p class="m-0 text-sm text-muted">Nový účet musí schváliť admin. Úplne prvý zaregistrovaný účet sa stáva adminom.</p>
+        <label class="block"><span class="${MODAL.label}">E-mail</span><input type="email" name="email" required autocomplete="username" class="${MODAL.input}"></label>
+        <label class="block"><span class="${MODAL.label}">Heslo (min. 8 znakov)</span><input type="password" name="password" required minlength="8" autocomplete="new-password" class="${MODAL.input}"></label>
+        <label class="block"><span class="${MODAL.label}">Heslo znova</span><input type="password" name="password_confirm" required minlength="8" autocomplete="new-password" class="${MODAL.input}"></label>
+        <button type="submit" class="mt-1 ${MODAL.primary}">Registrovať</button>
+      </form>
+    </div>
+  </div>`;
+}
+
+function renderPrefsModal(user, userLocations, menuDate) {
+  if (!user) return '';
+  const moveBtn = 'move-btn grid place-items-center w-11 h-11 rounded-lg border border-line-strong bg-surface text-ink cursor-pointer hover:border-ink disabled:opacity-30 disabled:cursor-default';
+  return `
+  <div id="prefs-modal" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/60 p-4">
+    <div role="dialog" aria-modal="true" aria-label="Môj výber" class="w-full max-w-md max-h-full overflow-y-auto bg-surface text-ink border border-line rounded-3xl shadow-2xl p-6 relative">
+      ${MODAL.close('prefs-close')}
+      <h2 class="m-0 font-display font-bold text-2xl tracking-tight">Môj výber</h2>
+      <p class="m-0 mt-1 mb-5 text-sm text-muted break-all">${escapeHtml(user.email)}</p>
+
+      <form method="post" action="/me/preferences" class="grid gap-5">
+        <input type="hidden" name="date" value="${escapeHtml(menuDate)}">
+        <label class="block"><span class="${MODAL.label}">Predvolená lokalita</span>
+          <select name="default_location" class="${MODAL.input}">
+            <option value="">Všetky lokality</option>
+            ${userLocations.map((name) => `<option value="${escapeHtml(name)}" ${name === user.default_location ? 'selected' : ''}>${escapeHtml(name)}</option>`).join('')}
+          </select>
+        </label>
+
+        <div>
+          <span class="${MODAL.label}">Poradie lokalít</span>
+          <ol id="order-list" class="m-0 mt-1 p-0 list-none grid gap-2">
+            ${userLocations.map((name) => `
+            <li class="order-item flex items-center gap-2 border border-line rounded-xl pl-4 pr-1.5 py-1.5">
+              <input type="hidden" name="order" value="${escapeHtml(name)}">
+              <span class="flex-1 font-semibold min-w-0 truncate">${escapeHtml(name)}</span>
+              <button type="button" class="${moveBtn}" data-move="-1" aria-label="Posunúť ${escapeHtml(name)} vyššie">↑</button>
+              <button type="button" class="${moveBtn}" data-move="1" aria-label="Posunúť ${escapeHtml(name)} nižšie">↓</button>
+            </li>`).join('')}
+          </ol>
+          <p class="m-0 mt-2 text-xs text-muted">Obľúbené reštaurácie označíš hviezdičkou, zobrazia sa navrchu svojej lokality.</p>
+        </div>
+
+        <div class="flex flex-wrap gap-2">
+          <button type="submit" name="action" value="save" class="flex-1 px-4 py-3 bg-ink text-surface font-bold rounded-xl cursor-pointer border-0 hover:opacity-90">Uložiť</button>
+          <button type="submit" name="action" value="reset_order" class="px-4 py-3 bg-transparent text-ink font-semibold rounded-xl cursor-pointer border border-line-strong hover:border-ink">Predvolené poradie</button>
+        </div>
+      </form>
+
+      <div class="flex justify-end mt-5 pt-4 border-t border-line">
+        <a href="/logout" class="text-sm font-semibold text-muted hover:text-ink no-underline">Odhlásiť sa</a>
+      </div>
+    </div>
+  </div>`;
 }
 
 // Password reset flow; login and registration live in the modal on the home page
@@ -1389,6 +1501,21 @@ function renderAdminPage({ items, sources, locations, users = [], currentUser, m
 
     ${notice ? `<div class="mb-4 px-4 py-3 bg-green-50 border border-green-200 text-green-800 font-semibold rounded-xl text-sm">${escapeHtml(notice)}</div>` : ''}
     ${error ? `<div class="mb-4 px-4 py-3 bg-red-50 border border-red-200 text-red-800 font-semibold rounded-xl text-sm">${escapeHtml(error)}</div>` : ''}
+
+    <div class="bg-white border border-gray-200 rounded-2xl shadow-sm p-4 mb-4 flex items-center justify-between gap-3 flex-wrap">
+      <div>
+        <h2 class="text-base font-bold">Vzhľad hlavnej stránky</h2>
+        <p class="text-sm text-gray-400 mt-0.5">Platí iba pre teba. Ostatní vidia Týždenný lístok.</p>
+      </div>
+      <form class="flex gap-1 p-1 bg-gray-100 rounded-full" method="post" action="/admin/layout">
+        <input type="hidden" name="menu_date" value="${escapeHtml(menuDate)}">
+        <input type="hidden" name="_tab" value="${escapeHtml(activeTab)}">
+        ${[['listok', 'Týždenný lístok'], ['palcom', 'Palcom']].map(([value, label]) => {
+          const on = (currentUser.page_layout || 'listok') === value;
+          return `<button type="submit" name="page_layout" value="${value}" aria-pressed="${on}" class="px-4 py-2 rounded-full text-sm font-bold border-0 cursor-pointer ${on ? 'bg-gray-900 text-white' : 'bg-transparent text-gray-500 hover:text-gray-900'}">${label}</button>`;
+        }).join('')}
+      </form>
+    </div>
 
     ${isAdminUser ? `
     <div class="bg-white border border-gray-200 rounded-2xl shadow-sm p-4 mb-4">
@@ -1661,6 +1788,7 @@ async function adminPost(req, res, url) {
     else if (url.pathname === '/admin/locations/create') await createLocation(form);
     else if (url.pathname === '/admin/locations/update') await updateLocation(form);
     else if (url.pathname === '/admin/locations/delete') await deleteLocation(form);
+    else if (url.pathname === '/admin/layout') await setPageLayout(user.id, form);
     else return sendHtml(res, 404, '<h1>404</h1>');
 
     redirect(res, `/admin?date=${encodeURIComponent(menuDate)}&tab=${encodeURIComponent(tab)}&notice=${encodeURIComponent('Zmena bola uložená.')}`);
@@ -1741,8 +1869,9 @@ const server = http.createServer(async (req, res) => {
       const user = await getSessionUser(req);
       const param = (name) => url.searchParams.get(name) || '';
       const menuDate = parseIsoDate(param('date')) ? param('date') : todayIso();
-      const { items, lastUpdatedAt } = await queryMenu(menuDate, user?.id ?? null);
+      const { items, sources, lastUpdatedAt } = await queryMenu(menuDate, user?.id ?? null);
       return sendHtml(res, 200, renderPublicPage(items, {
+        sources,
         menuDate,
         lastUpdatedAt,
         user,
