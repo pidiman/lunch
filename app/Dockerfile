@@ -16,7 +16,8 @@ ENV NODE_ENV=production
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 
-COPY server.js favicon.svg ./
+COPY server.js db.js migrate.js favicon.svg ./
+COPY migrations ./migrations
 COPY --from=assets /build/tailwind.css ./
 
 USER node

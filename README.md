@@ -42,8 +42,18 @@ CSS sa builduje cez Tailwind CLI (v Dockeri automaticky v prvom build stage). Pr
 cd app
 npm install
 npm run build:css   # vygeneruje app/tailwind.css
+npm run migrate     # aplikuje DB migrácie (potrebuje DB_* premenné)
 npm start
 ```
+
+## DB migrácie
+
+Schéma sa spravuje SQL súbormi v [app/migrations/](app/migrations/), ktoré sa aplikujú v poradí podľa názvu. Aplikované migrácie sa evidujú v tabuľke `schema_migrations`.
+
+- Pri `docker compose up` sa najprv spustí jednorazová služba `obedove-menu-migrate`. Web štartuje až po jej úspešnom dokončení.
+- Ručné spustenie: `docker compose run --rm obedove-menu-migrate`
+- Nová zmena schémy = nový súbor, napr. `003_pridaj_stlpec.sql`. Už aplikované súbory sa nemenia.
+- Webová aplikácia schému pri štarte nemení.
 
 ## Web
 

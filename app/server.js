@@ -2,21 +2,11 @@ const http = require('http');
 const net = require('net');
 const fs = require('fs');
 const path = require('path');
-const { Pool } = require('pg');
 const crypto = require('crypto');
 const { promisify } = require('util');
+const { requireEnv, createPool } = require('./db');
 
 const scryptAsync = promisify(crypto.scrypt);
-
-// Fail fast on missing deploy-specific config instead of silently using a guess
-function requireEnv(name) {
-  const value = process.env[name];
-  if (!value) {
-    console.error(`Chýba povinná premenná prostredia ${name}.`);
-    process.exit(1);
-  }
-  return value;
-}
 
 const PORT = Number(process.env.PORT || 3000);
 const SITE_TITLE = process.env.SITE_TITLE || 'Obedové menu';
@@ -26,20 +16,9 @@ const RESET_CODE_TTL_MINUTES = 15;
 const SMTP_HOST = requireEnv('SMTP_HOST');
 const SMTP_PORT = Number(process.env.SMTP_PORT || 25);
 const SMTP_FROM = requireEnv('SMTP_FROM');
-const DB_CONNECT_RETRIES = Number(process.env.DB_CONNECT_RETRIES || 20);
-const LOCATION_OPTIONS = ['Praca', 'Karlovka', 'Stupava'];
 const CATEGORIES = ['soup', 'main', 'special', 'pizza', 'side', 'dessert', 'drink', 'unknown'];
 
-const pool = new Pool({
-  host: requireEnv('DB_HOST'),
-  port: Number(process.env.DB_PORT || 5432),
-  database: requireEnv('DB_NAME'),
-  user: requireEnv('DB_USER'),
-  password: requireEnv('DB_PASSWORD'),
-  max: 5,
-});
-
-pool.on('error', (err) => console.error('pg pool error:', err.message));
+const pool = createPool({ max: 5 });
 
 function readStaticAsset(fileName) {
   try {
@@ -124,72 +103,6 @@ function formatDateSk(value = new Date()) {
     month: '2-digit',
     year: 'numeric',
   }).format(value);
-}
-
-async function ensureSchema() {
-  await pool.query(`ALTER TABLE public.lunch_sources ADD COLUMN IF NOT EXISTS source_location TEXT NOT NULL DEFAULT 'Praca'`);
-  await pool.query(`UPDATE public.lunch_sources SET source_location = 'Stupava' WHERE source_id = 'belavery' AND (source_location IS NULL OR source_location = 'Praca')`);
-  await pool.query(`UPDATE public.lunch_sources SET source_location = 'Karlovka' WHERE source_id = 'amelia' AND (source_location IS NULL OR source_location = 'Praca')`);
-  await pool.query(`UPDATE public.lunch_sources SET source_location = 'Praca' WHERE source_id = 'zark' AND (source_location IS NULL OR source_location = '')`);
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS public.lunch_locations (
-      name TEXT PRIMARY KEY,
-      weight INTEGER NOT NULL DEFAULT 100,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    )
-  `);
-  await pool.query(`
-    INSERT INTO public.lunch_locations (name, weight) VALUES
-      ('Praca', 10), ('Karlovka', 20), ('Stupava', 30)
-    ON CONFLICT (name) DO NOTHING
-  `);
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS public.lunch_users (
-      id BIGSERIAL PRIMARY KEY,
-      email TEXT NOT NULL UNIQUE,
-      password_hash TEXT NOT NULL,
-      role TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('admin', 'user')),
-      is_approved BOOLEAN NOT NULL DEFAULT FALSE,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    )
-  `);
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS public.lunch_sessions (
-      token_hash TEXT PRIMARY KEY,
-      user_id BIGINT NOT NULL REFERENCES public.lunch_users(id) ON DELETE CASCADE,
-      expires_at TIMESTAMPTZ NOT NULL,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    )
-  `);
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS public.lunch_password_resets (
-      id BIGSERIAL PRIMARY KEY,
-      user_id BIGINT NOT NULL REFERENCES public.lunch_users(id) ON DELETE CASCADE,
-      code_hash TEXT NOT NULL,
-      expires_at TIMESTAMPTZ NOT NULL,
-      used_at TIMESTAMPTZ,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    )
-  `);
-}
-
-// Give up after DB_CONNECT_RETRIES so the container exits and the restart policy takes over
-async function ensureSchemaWithRetry() {
-  for (let attempt = 1; ; attempt += 1) {
-    try {
-      await ensureSchema();
-      return;
-    } catch (err) {
-      if (attempt >= DB_CONNECT_RETRIES) {
-        console.error(`Inicializácia schémy zlyhala ${attempt}x, končím:`, err.message);
-        process.exit(1);
-      }
-      console.error(`Inicializácia schémy zlyhala (pokus ${attempt}/${DB_CONNECT_RETRIES}), skúšam znova o 3 s:`, err.message);
-      await new Promise((resolve) => setTimeout(resolve, 3000));
-    }
-  }
 }
 
 function parseCookies(req) {
@@ -471,7 +384,7 @@ async function queryTodayMenu() {
         m.source_id,
         m.source_name,
         m.source_url,
-        COALESCE(s.source_location, 'Praca') AS source_location,
+        s.source_location,
         m.menu_date,
         m.menu_code,
         m.category,
@@ -483,10 +396,10 @@ async function queryTodayMenu() {
         m.parsed_at
       FROM public.v_lunch_menu_today m
       LEFT JOIN public.lunch_sources s ON s.source_id = m.source_id
-      LEFT JOIN public.lunch_locations loc ON loc.name = COALESCE(s.source_location, 'Praca')
+      LEFT JOIN public.lunch_locations loc ON loc.name = s.source_location
       ORDER BY
         COALESCE(loc.weight, 999),
-        COALESCE(s.source_location, 'Praca'),
+        s.source_location,
         m.source_name,
         CASE m.category
           WHEN 'soup' THEN 1
@@ -557,7 +470,7 @@ async function queryAdminData(menuDate) {
       source_name,
       source_type,
       source_url,
-      COALESCE(source_location, 'Praca') AS source_location
+      source_location
     FROM public.lunch_sources
     ORDER BY source_location, source_name
   `);
@@ -698,11 +611,13 @@ async function deleteItem(form) {
 }
 
 async function updateRestaurant(form) {
+  const location = clean(form.source_location);
+  if (!location) throw new Error('Lokalita je povinná.');
   await pool.query(`
     UPDATE public.lunch_sources
     SET source_location = $2, updated_at = NOW()
     WHERE source_id = $1
-  `, [clean(form.source_id), clean(form.source_location, 'Praca')]);
+  `, [clean(form.source_id), location]);
 }
 
 async function createLocation(form) {
@@ -731,7 +646,7 @@ async function deleteLocation(form) {
 
 function groupByLocationAndSource(items) {
   return items.reduce((acc, item) => {
-    const location = item.source_location || 'Praca';
+    const location = item.source_location;
     const source = item.source_name || 'Neznámy zdroj';
     acc[location] ||= {};
     acc[location][source] ||= [];
@@ -1093,8 +1008,8 @@ function renderAdminPage({ items, sources, locations, users = [], currentUser, m
     `<option value="${c}" ${c === selected ? 'selected' : ''}>${escapeHtml(categoryLabel(c))}</option>`
   ).join('');
 
-  const locationOptions = (selected = 'Praca') => {
-    const names = locations.length ? locations.map((l) => l.name) : LOCATION_OPTIONS;
+  const locationOptions = (selected) => {
+    const names = locations.map((l) => l.name);
     const opts = names.map((name) => `<option value="${escapeHtml(name)}" ${name === selected ? 'selected' : ''}>${escapeHtml(name)}</option>`).join('');
     return opts + (!names.includes(selected) ? `<option value="${escapeHtml(selected)}" selected>${escapeHtml(selected)}</option>` : '');
   };
@@ -1110,7 +1025,7 @@ function renderAdminPage({ items, sources, locations, users = [], currentUser, m
         <form class="flex items-center gap-2 flex-wrap" method="post" action="/admin/restaurants/update">
           <input type="hidden" name="_tab" value="restauracie">
           <input type="hidden" name="source_id" value="${escapeHtml(src.source_id)}">
-          <select name="source_location" class="border border-gray-300 rounded-lg px-3 py-1.5 text-sm bg-white">${locationOptions(src.source_location || 'Praca')}</select>
+          <select name="source_location" class="border border-gray-300 rounded-lg px-3 py-1.5 text-sm bg-white">${locationOptions(src.source_location)}</select>
           <button type="submit" class="${tw.btnGreen}">Uložiť</button>
         </form>
       </td>
@@ -1559,8 +1474,8 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-async function start() {
-  await ensureSchemaWithRetry();
+// Schema is managed by migrate.js (a separate one-off process), not at web startup
+function start() {
   server.listen(PORT, '0.0.0.0', () => console.log(`obedove-menu listening on ${PORT}`));
 }
 

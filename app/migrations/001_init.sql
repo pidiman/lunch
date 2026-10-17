@@ -3,8 +3,7 @@
 -- Purpose:
 --   n8n import workflow stores normalized daily lunch menu items here.
 --   Web landing page reads today's menu from v_lunch_menu_today.
-
-BEGIN;
+-- Idempotent so it is a no-op on databases created before migrations existed.
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
@@ -141,16 +140,7 @@ VALUES
     'zark_pdf',
     'v1-weekday-block-parser'
   )
-ON CONFLICT (source_id) DO UPDATE SET
-  source_name = EXCLUDED.source_name,
-  source_type = EXCLUDED.source_type,
-  source_url = EXCLUDED.source_url,
-  restaurant_name = EXCLUDED.restaurant_name,
-  city = EXCLUDED.city,
-  source_location = COALESCE(lunch_sources.source_location, EXCLUDED.source_location),
-  parser_name = EXCLUDED.parser_name,
-  parser_version = EXCLUDED.parser_version,
-  updated_at = NOW();
+ON CONFLICT (source_id) DO NOTHING;
 
 -- 6) Indexes for n8n upsert and fast landing page reads
 CREATE INDEX IF NOT EXISTS idx_lunch_sources_location
@@ -260,5 +250,3 @@ SELECT
   r.meta
 FROM lunch_import_runs r
 ORDER BY r.started_at DESC;
-
-COMMIT;
