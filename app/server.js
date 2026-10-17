@@ -895,7 +895,7 @@ function renderPublicPage(items, { menuDate = todayIso(), error = null, lastUpda
 
   const headerActions = user ? `
         ${user.role === 'admin' ? `<a href="/admin" class="${headerBtnClass} border border-line-strong bg-surface text-ink hover:border-ink">Admin</a>` : ''}
-        <button id="prefs-open" type="button" class="${headerBtnClass} border-0 bg-ink text-ground hover:opacity-90" aria-label="Môj výber (${escapeHtml(user.email)})">
+        <button id="prefs-open" type="button" class="${headerBtnClass} border border-line-strong bg-surface text-ink hover:border-ink" aria-label="Môj výber (${escapeHtml(user.email)})">
           <span class="grid place-items-center w-6 h-6 rounded-full bg-accent text-white text-xs font-bold uppercase" aria-hidden="true">${escapeHtml(user.email.charAt(0))}</span>
           <span class="hidden sm:inline">Môj výber</span>
         </button>` : `
