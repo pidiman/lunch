@@ -7,15 +7,14 @@ services:
     environment:
       - DB_HOST=obedove-menu-db
       - DB_PORT=5432
-      - DB_NAME=${DB_NAME}
-      - DB_USER=${DB_USER}
-      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_NAME=${DB_NAME:?DB_NAME is required}
+      - DB_USER=${DB_USER:?DB_USER is required}
+      - DB_PASSWORD=${DB_PASSWORD:?DB_PASSWORD is required}
       - SITE_TITLE=${SITE_TITLE:-Obedové menu}
       # Local SMTP relay used for password reset codes (no auth/TLS)
       - SMTP_HOST=${SMTP_HOST:-smtp-relay}
       - SMTP_PORT=${SMTP_PORT:-25}
-      - SMTP_FROM=${SMTP_FROM:-noreply-menu@pidiman.sk}
-      - APP_URL=${APP_URL:-https://menu.pidiman.sk}
+      - SMTP_FROM=${SMTP_FROM:?SMTP_FROM is required}
       - TZ=Europe/Bratislava
       - NODE_ENV=production
       - PORT=3000
@@ -41,9 +40,9 @@ services:
     container_name: obedove-menu-db
     restart: unless-stopped
     environment:
-      POSTGRES_DB: ${DB_NAME}
-      POSTGRES_USER: ${DB_USER}
-      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME:?DB_NAME is required}
+      POSTGRES_USER: ${DB_USER:?DB_USER is required}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
       TZ: Europe/Bratislava
     ports:
       # n8n runs on another machine, so PostgreSQL must be reachable from LAN/Tailscale.

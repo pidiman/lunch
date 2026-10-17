@@ -8,23 +8,34 @@ const { promisify } = require('util');
 
 const scryptAsync = promisify(crypto.scrypt);
 
+// Fail fast on missing deploy-specific config instead of silently using a guess
+function requireEnv(name) {
+  const value = process.env[name];
+  if (!value) {
+    console.error(`Chýba povinná premenná prostredia ${name}.`);
+    process.exit(1);
+  }
+  return value;
+}
+
 const PORT = Number(process.env.PORT || 3000);
 const SITE_TITLE = process.env.SITE_TITLE || 'Obedové menu';
 const IS_PRODUCTION = process.env.NODE_ENV === 'production';
 const SESSION_TTL_DAYS = 30;
 const RESET_CODE_TTL_MINUTES = 15;
-const SMTP_HOST = process.env.SMTP_HOST || 'smtp-relay';
+const SMTP_HOST = requireEnv('SMTP_HOST');
 const SMTP_PORT = Number(process.env.SMTP_PORT || 25);
-const SMTP_FROM = process.env.SMTP_FROM || 'obedove-menu@localhost';
+const SMTP_FROM = requireEnv('SMTP_FROM');
+const DB_CONNECT_RETRIES = Number(process.env.DB_CONNECT_RETRIES || 20);
 const LOCATION_OPTIONS = ['Praca', 'Karlovka', 'Stupava'];
 const CATEGORIES = ['soup', 'main', 'special', 'pizza', 'side', 'dessert', 'drink', 'unknown'];
 
 const pool = new Pool({
-  host: process.env.DB_HOST || 'obedove-menu-db',
+  host: requireEnv('DB_HOST'),
   port: Number(process.env.DB_PORT || 5432),
-  database: process.env.DB_NAME || 'obedove_menu',
-  user: process.env.DB_USER || 'obedove_menu_user',
-  password: process.env.DB_PASSWORD || '',
+  database: requireEnv('DB_NAME'),
+  user: requireEnv('DB_USER'),
+  password: requireEnv('DB_PASSWORD'),
   max: 5,
 });
 
@@ -164,13 +175,18 @@ async function ensureSchema() {
   `);
 }
 
+// Give up after DB_CONNECT_RETRIES so the container exits and the restart policy takes over
 async function ensureSchemaWithRetry() {
-  for (;;) {
+  for (let attempt = 1; ; attempt += 1) {
     try {
       await ensureSchema();
       return;
     } catch (err) {
-      console.error('Inicializácia schémy zlyhala, skúšam znova o 3 s:', err.message);
+      if (attempt >= DB_CONNECT_RETRIES) {
+        console.error(`Inicializácia schémy zlyhala ${attempt}x, končím:`, err.message);
+        process.exit(1);
+      }
+      console.error(`Inicializácia schémy zlyhala (pokus ${attempt}/${DB_CONNECT_RETRIES}), skúšam znova o 3 s:`, err.message);
       await new Promise((resolve) => setTimeout(resolve, 3000));
     }
   }
