@@ -196,7 +196,10 @@ FOR EACH ROW
 EXECUTE FUNCTION set_updated_at();
 
 -- 8) View used by the landing page
-CREATE OR REPLACE VIEW v_lunch_menu_today AS
+-- Drop + create (not CREATE OR REPLACE): older deployments have this view with a
+-- different column list, which CREATE OR REPLACE VIEW cannot change.
+DROP VIEW IF EXISTS v_lunch_menu_today;
+CREATE VIEW v_lunch_menu_today AS
 SELECT
   i.id,
   i.item_uid,
@@ -237,7 +240,8 @@ ORDER BY
   i.title;
 
 -- 9) View for last import status
-CREATE OR REPLACE VIEW v_lunch_import_status AS
+DROP VIEW IF EXISTS v_lunch_import_status;
+CREATE VIEW v_lunch_import_status AS
 SELECT
   r.run_id,
   r.started_at,
