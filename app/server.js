@@ -23,7 +23,7 @@ const N8N_TEST_WEBHOOK_TOKEN = process.env.N8N_TEST_WEBHOOK_TOKEN || '';
 
 // Parser registry shared with the n8n parser workflow (its Switch routes on these keys)
 const PARSERS = {
-  ai_extract: { label: 'AI extrakcia (odporúčané)', sourceType: 'html_daily_menu_page', hint: 'Ľubovoľný web reštaurácie, aj menu v PDF alebo na obrázku: Claude z neho vytiahne denné menu. Účtuje sa podľa použitia (rádovo centy za deň), over ho testom.' },
+  ai_extract: { label: 'AI extrakcia (odporúčané)', sourceType: 'html_daily_menu_page', hint: 'Ľubovoľný web reštaurácie, aj menu v PDF alebo na obrázku: AI model (cez OpenRouter) z neho vytiahne denné menu. Účtuje sa podľa použitia (rádovo centy za deň), over ho testom.' },
   sme_restauracie: { label: 'SME Reštaurácie', sourceType: 'html_daily_menu_page', hint: 'URL „Denné menu“ na restauracie.sme.sk. Pozor: SME chráni stránky captchou a automatické čítanie často zablokuje.' },
   woocommerce_category: { label: 'WooCommerce kategória', sourceType: 'html_woocommerce_category', hint: 'Kategória „denné menu“ v e-shope na WooCommerce (ako BelaVery). Jedlá v tvare „01 – Názov … 7,90 €“.' },
   amelia: { label: 'Ostravárna Amélia', sourceType: 'html_daily_menu_page', hint: 'Iba pre web ameliarestaurant.sk.' },
