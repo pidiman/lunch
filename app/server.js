@@ -133,8 +133,13 @@ function hashSessionToken(token) {
   return crypto.createHash('sha256').update(String(token)).digest('hex');
 }
 
-function sessionCookie(token, maxAgeSeconds = SESSION_TTL_DAYS * 86400) {
-  return `lunch_session=${encodeURIComponent(token)}; HttpOnly; SameSite=Lax; Path=/admin; Max-Age=${maxAgeSeconds}`;
+// The session is site-wide (the public page is personalized). Each call also expires the
+// cookie older versions scoped to Path=/admin, so it can't shadow the current one.
+function sessionCookies(token, maxAgeSeconds = SESSION_TTL_DAYS * 86400) {
+  return [
+    `lunch_session=${encodeURIComponent(token)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAgeSeconds}`,
+    'lunch_session=; HttpOnly; SameSite=Lax; Path=/admin; Max-Age=0',
+  ];
 }
 
 async function createSession(userId) {
@@ -151,7 +156,7 @@ async function getSessionUser(req) {
   const token = parseCookies(req).lunch_session || '';
   if (!token) return null;
   const result = await pool.query(`
-    SELECT u.id, u.email, u.role, u.is_approved
+    SELECT u.id, u.email, u.role, u.is_approved, u.default_location
     FROM public.lunch_sessions s
     JOIN public.lunch_users u ON u.id = s.user_id
     WHERE s.token_hash = $1 AND s.expires_at > NOW()
@@ -378,7 +383,9 @@ async function readForm(req) {
   return Object.fromEntries(new URLSearchParams(await readBody(req)));
 }
 
-async function queryTodayMenu() {
+// userId is null for anonymous visitors: personal joins then match nothing and the
+// global order applies. Logged-in users get their own location order and favorites first.
+async function queryTodayMenu(userId = null) {
   const menu = await pool.query(`
       SELECT
         m.source_id,
@@ -393,13 +400,17 @@ async function queryTodayMenu() {
         m.price_eur,
         m.currency,
         m.allergens,
-        m.parsed_at
+        m.parsed_at,
+        (fav.source_id IS NOT NULL) AS is_favorite
       FROM public.v_lunch_menu_today m
       LEFT JOIN public.lunch_sources s ON s.source_id = m.source_id
       LEFT JOIN public.lunch_locations loc ON loc.name = s.source_location
+      LEFT JOIN public.lunch_user_location_weights ulw ON ulw.location_name = s.source_location AND ulw.user_id = $1
+      LEFT JOIN public.lunch_user_favorites fav ON fav.source_id = m.source_id AND fav.user_id = $1
       ORDER BY
-        COALESCE(loc.weight, 999),
+        COALESCE(ulw.weight, loc.weight, 999),
         s.source_location,
+        (fav.source_id IS NULL),
         m.source_name,
         CASE m.category
           WHEN 'soup' THEN 1
@@ -413,7 +424,7 @@ async function queryTodayMenu() {
         END,
         m.menu_code NULLS LAST,
         m.title
-  `);
+  `, [userId]);
 
   const meta = await pool.query(`
     SELECT MAX(created_at) AS last_updated_at
@@ -423,6 +434,61 @@ async function queryTodayMenu() {
   `);
 
   return { items: menu.rows, lastUpdatedAt: meta.rows[0]?.last_updated_at || null };
+}
+
+// All locations in the user's effective order (personal weight, else global)
+async function queryUserLocations(userId) {
+  const result = await pool.query(`
+    SELECT l.name
+    FROM public.lunch_locations l
+    LEFT JOIN public.lunch_user_location_weights ulw ON ulw.location_name = l.name AND ulw.user_id = $1
+    ORDER BY COALESCE(ulw.weight, l.weight), l.name
+  `, [userId]);
+  return result.rows.map((r) => r.name);
+}
+
+async function toggleFavorite(userId, sourceId) {
+  const removed = await pool.query(`DELETE FROM public.lunch_user_favorites WHERE user_id = $1 AND source_id = $2`, [userId, sourceId]);
+  if (removed.rowCount) return false;
+  try {
+    await pool.query(`INSERT INTO public.lunch_user_favorites (user_id, source_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, [userId, sourceId]);
+  } catch (err) {
+    if (err.code === '23503') throw new Error('Neznáma reštaurácia.');
+    throw err;
+  }
+  return true;
+}
+
+async function savePreferences(userId, params) {
+  const globalOrder = (await pool.query(`SELECT name FROM public.lunch_locations ORDER BY weight, name`)).rows.map((r) => r.name);
+  const known = new Set(globalOrder);
+
+  const defaultLocation = clean(params.get('default_location'));
+  if (defaultLocation && !known.has(defaultLocation)) throw new Error('Neznáma lokalita.');
+
+  const order = [...new Set(params.getAll('order').map((name) => clean(name)))].filter((name) => known.has(name));
+  // Matching the global order (or an explicit reset) means "follow the admin's order"
+  const followGlobal = params.get('action') === 'reset_order' || order.join('\n') === globalOrder.join('\n');
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(`UPDATE public.lunch_users SET default_location = $2, updated_at = NOW() WHERE id = $1`, [userId, defaultLocation || null]);
+    await client.query(`DELETE FROM public.lunch_user_location_weights WHERE user_id = $1`, [userId]);
+    if (!followGlobal) {
+      for (const [index, name] of order.entries()) {
+        await client.query(`
+          INSERT INTO public.lunch_user_location_weights (user_id, location_name, weight) VALUES ($1, $2, $3)
+        `, [userId, name, (index + 1) * 10]);
+      }
+    }
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 async function queryAdminData(menuDate) {
@@ -713,7 +779,11 @@ function renderMenuItem(item, index = 0) {
   `;
 }
 
-function renderPublicPage(items, error = null, lastUpdatedAt = null) {
+const STAR_SVG = '<svg width="22" height="22" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true" class="fill-none group-aria-pressed:fill-current"><path d="m12 3 2.7 5.6 6.1.8-4.5 4.2 1.1 6.1L12 16.8l-5.4 2.9 1.1-6.1-4.5-4.2 6.1-.8z"/></svg>';
+
+// auth: { pane, error, notice } opens the login modal on load (after a failed login, registration, …)
+// user / userLocations / flash are only set for logged-in visitors
+function renderPublicPage(items, { error = null, lastUpdatedAt = null, user = null, userLocations = [], auth = null, flash = null } = {}) {
   const today = formatHeroDate(new Date());
   const updatedAt = formatTime(lastUpdatedAt);
   const updatedLabel = updatedAt === '—' ? 'Zatiaľ bez aktualizácie' : `Aktualizované o ${updatedAt}`;
@@ -723,6 +793,8 @@ function renderPublicPage(items, error = null, lastUpdatedAt = null) {
   // Order comes from the DB query (already sorted by location weight), preserve insertion order
   const locations = Object.keys(grouped);
   const locationItemCount = (location) => Object.values(grouped[location]).reduce((sum, rows) => sum + rows.length, 0);
+  // Pre-select the user's default location tab server-side, so there is no flash of "all"
+  const activeLocation = user?.default_location && locations.length > 1 && locations.includes(user.default_location) ? user.default_location : 'all';
 
   const content = locations.map((location) => {
     const restaurantEntries = Object.entries(grouped[location]);
@@ -730,11 +802,19 @@ function renderPublicPage(items, error = null, lastUpdatedAt = null) {
     const restaurants = restaurantEntries.map(([sourceName, rows]) => {
       const sourceUrl = rows.find((row) => row.source_url)?.source_url;
       const collapsible = rows.length > 3;
+      const favorite = Boolean(rows[0].is_favorite);
+      const favButton = user ? `
+              <form class="fav-form flex-none" method="post" action="/me/favorites/toggle">
+                <input type="hidden" name="source_id" value="${escapeHtml(rows[0].source_id)}">
+                <button type="submit" class="fav-btn group grid place-items-center w-11 h-11 -my-2 rounded-full border-0 bg-transparent text-muted hover:text-accent aria-pressed:text-accent cursor-pointer" aria-pressed="${favorite}" aria-label="${favorite ? 'Odobrať z obľúbených' : 'Pridať do obľúbených'}">${STAR_SVG}</button>
+              </form>` : '';
       return `
         <article class="restaurant-card flex flex-col bg-surface border border-line rounded-3xl p-5 sm:p-6 ${collapsible ? 'mobile-collapsible' : ''}">
           <div class="flex items-center justify-between gap-3 pb-3.5">
-            <h3 class="m-0 font-display font-bold text-2xl tracking-tight">${escapeHtml(sourceName)}</h3>
-            ${sourceUrl ? `<a class="inline-flex items-center gap-1 min-h-11 text-sm font-semibold text-ink no-underline hover:text-accent" href="${escapeHtml(sourceUrl)}" target="_blank" rel="noreferrer">Zdroj menu ${ARROW_SVG}</a>` : ''}
+            <div class="flex items-center gap-1 min-w-0">
+              <h3 class="m-0 font-display font-bold text-2xl tracking-tight">${escapeHtml(sourceName)}</h3>${favButton}
+            </div>
+            ${sourceUrl ? `<a class="inline-flex items-center gap-1 min-h-11 text-sm font-semibold text-ink no-underline hover:text-accent flex-none" href="${escapeHtml(sourceUrl)}" target="_blank" rel="noreferrer">Zdroj menu ${ARROW_SVG}</a>` : ''}
           </div>
           <div>${rows.map((row, index) => renderMenuItem(row, index)).join('')}</div>
           ${collapsible ? `<button type="button" class="restaurant-toggle sm:hidden mt-1 min-h-11 w-full rounded-2xl border border-line-strong bg-transparent text-ink text-sm font-semibold cursor-pointer" aria-expanded="false"><span class="toggle-more">Zobraziť všetko (${rows.length})</span><span class="toggle-less">Zobraziť menej</span></button>` : ''}
@@ -743,7 +823,7 @@ function renderPublicPage(items, error = null, lastUpdatedAt = null) {
     }).join('');
 
     return `
-      <section class="location-section pb-10" data-location="${escapeHtml(location)}">
+      <section class="location-section pb-10" data-location="${escapeHtml(location)}" ${activeLocation !== 'all' && activeLocation !== location ? 'hidden' : ''}>
         <div class="flex flex-wrap items-baseline gap-x-3 gap-y-1 mb-4">
           <span class="w-2.5 h-2.5 rounded-full bg-accent self-center flex-none"></span>
           <h2 class="m-0 font-display font-bold text-3xl tracking-tight">${escapeHtml(location)}</h2>
@@ -756,8 +836,8 @@ function renderPublicPage(items, error = null, lastUpdatedAt = null) {
 
   const tabClass = 'location-tab inline-flex items-center gap-2 h-11 px-4.5 rounded-full border text-[15px] font-semibold cursor-pointer bg-surface text-ink border-line-strong hover:border-ink aria-pressed:bg-ink aria-pressed:text-ground aria-pressed:border-ink';
   const tabs = locations.length > 1 ? [
-    `<button type="button" class="${tabClass}" data-location="all" aria-pressed="true">Všetky lokality <span class="text-[13px] opacity-70">${items.length}</span></button>`,
-    ...locations.map((location) => `<button type="button" class="${tabClass}" data-location="${escapeHtml(location)}" aria-pressed="false">${escapeHtml(location)} <span class="text-[13px] opacity-70">${locationItemCount(location)}</span></button>`),
+    `<button type="button" class="${tabClass}" data-location="all" aria-pressed="${activeLocation === 'all'}">Všetky lokality <span class="text-[13px] opacity-70">${items.length}</span></button>`,
+    ...locations.map((location) => `<button type="button" class="${tabClass}" data-location="${escapeHtml(location)}" aria-pressed="${activeLocation === location}">${escapeHtml(location)} <span class="text-[13px] opacity-70">${locationItemCount(location)}</span></button>`),
   ].join('') : '';
 
   const statTile = (value, label) => `
@@ -767,9 +847,96 @@ function renderPublicPage(items, error = null, lastUpdatedAt = null) {
     </div>`;
 
   const notice = (title, text) => `<div class="bg-surface border border-line rounded-3xl p-6 mb-10"><h2 class="m-0 font-display font-bold text-2xl tracking-tight">${escapeHtml(title)}</h2><p class="m-0 mt-2 text-muted">${escapeHtml(text)}</p></div>`;
+  const message = (kind, text) => text ? `<div class="mb-4 px-4 py-3 rounded-xl text-sm font-semibold border ${kind === 'error' ? 'bg-red-50 border-red-200 text-red-800 dark:bg-red-950 dark:border-red-900 dark:text-red-200' : 'bg-green-50 border-green-200 text-green-800 dark:bg-green-950 dark:border-green-900 dark:text-green-200'}">${escapeHtml(text)}</div>` : '';
   const inputClass = 'mt-1 w-full border border-line-strong rounded-xl px-4 py-3 text-base bg-ground text-ink focus:outline-none focus:ring-2 focus:ring-accent';
   const labelClass = 'block text-xs font-bold text-muted uppercase tracking-wide';
   const paneBtnClass = 'auth-pane-btn h-10 px-4 rounded-full text-sm font-semibold border cursor-pointer bg-surface text-muted border-line-strong aria-pressed:bg-ink aria-pressed:text-ground aria-pressed:border-ink';
+  const headerBtnClass = 'inline-flex items-center gap-2 h-11 px-3.5 sm:px-4.5 rounded-xl text-[15px] font-semibold cursor-pointer no-underline';
+  const closeButton = (id) => `
+      <button id="${id}" type="button" aria-label="Zavrieť" class="absolute top-4 right-4 grid place-items-center w-10 h-10 rounded-full bg-ground text-muted hover:text-ink cursor-pointer border-0">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>
+      </button>`;
+  const authPane = auth?.pane === 'register' ? 'register' : 'login';
+
+  const headerActions = user ? `
+        ${user.role === 'admin' ? `<a href="/admin" class="${headerBtnClass} border border-line-strong bg-surface text-ink hover:border-ink">Admin</a>` : ''}
+        <button id="prefs-open" type="button" class="${headerBtnClass} border-0 bg-ink text-ground hover:opacity-90" aria-label="Môj výber (${escapeHtml(user.email)})">
+          <span class="grid place-items-center w-6 h-6 rounded-full bg-accent text-white text-xs font-bold uppercase" aria-hidden="true">${escapeHtml(user.email.charAt(0))}</span>
+          <span class="hidden sm:inline">Môj výber</span>
+        </button>` : `
+        <button id="login-open" type="button" class="${headerBtnClass} border-0 bg-ink text-ground hover:opacity-90">Prihlásiť sa</button>`;
+
+  const loginModal = user ? '' : `
+  <div id="login-modal" class="fixed inset-0 z-50 ${auth ? 'flex' : 'hidden'} items-center justify-center bg-black/60 p-4">
+    <div role="dialog" aria-modal="true" aria-label="Prihlásenie" class="w-full max-w-md bg-surface text-ink border border-line rounded-3xl shadow-2xl p-6 relative">
+      ${closeButton('login-close')}
+
+      <div class="flex gap-2 mb-5">
+        <button type="button" class="${paneBtnClass}" data-pane="login" aria-pressed="${authPane === 'login'}">Prihlásenie</button>
+        <button type="button" class="${paneBtnClass}" data-pane="register" aria-pressed="${authPane === 'register'}">Registrácia</button>
+      </div>
+
+      ${message('error', auth?.error)}
+      ${message('notice', auth?.notice)}
+
+      <form id="pane-login" method="post" action="/admin/login" class="${authPane === 'login' ? '' : 'hidden'} grid gap-3">
+        <label class="block"><span class="${labelClass}">E-mail</span><input type="email" name="email" required autocomplete="username" class="${inputClass}"></label>
+        <label class="block"><span class="${labelClass}">Heslo</span><input type="password" name="password" required autocomplete="current-password" class="${inputClass}"></label>
+        <button type="submit" class="mt-1 w-full px-4 py-3 bg-ink text-ground font-bold rounded-xl cursor-pointer border-0 hover:opacity-90">Prihlásiť</button>
+        <a href="/admin?view=reset" class="text-sm font-semibold text-muted hover:text-ink no-underline justify-self-start">Zabudnuté heslo?</a>
+      </form>
+
+      <form id="pane-register" method="post" action="/admin/register" class="${authPane === 'register' ? '' : 'hidden'} grid gap-3">
+        <p class="m-0 text-sm text-muted">Nový účet musí schváliť admin. Úplne prvý zaregistrovaný účet sa stáva adminom.</p>
+        <label class="block"><span class="${labelClass}">E-mail</span><input type="email" name="email" required autocomplete="username" class="${inputClass}"></label>
+        <label class="block"><span class="${labelClass}">Heslo (min. 8 znakov)</span><input type="password" name="password" required minlength="8" autocomplete="new-password" class="${inputClass}"></label>
+        <label class="block"><span class="${labelClass}">Heslo znova</span><input type="password" name="password_confirm" required minlength="8" autocomplete="new-password" class="${inputClass}"></label>
+        <button type="submit" class="mt-1 w-full px-4 py-3 bg-ink text-ground font-bold rounded-xl cursor-pointer border-0 hover:opacity-90">Registrovať</button>
+      </form>
+    </div>
+  </div>`;
+
+  const moveBtnClass = 'move-btn grid place-items-center w-11 h-11 rounded-lg border border-line-strong bg-surface text-ink cursor-pointer hover:border-ink disabled:opacity-30 disabled:cursor-default';
+  const prefsModal = !user ? '' : `
+  <div id="prefs-modal" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/60 p-4">
+    <div role="dialog" aria-modal="true" aria-label="Môj výber" class="w-full max-w-md max-h-full overflow-y-auto bg-surface text-ink border border-line rounded-3xl shadow-2xl p-6 relative">
+      ${closeButton('prefs-close')}
+      <h2 class="m-0 font-display font-bold text-2xl tracking-tight">Môj výber</h2>
+      <p class="m-0 mt-1 mb-5 text-sm text-muted break-all">${escapeHtml(user.email)}</p>
+
+      <form method="post" action="/me/preferences" class="grid gap-5">
+        <label class="block"><span class="${labelClass}">Predvolená lokalita</span>
+          <select name="default_location" class="${inputClass}">
+            <option value="">Všetky lokality</option>
+            ${userLocations.map((name) => `<option value="${escapeHtml(name)}" ${name === user.default_location ? 'selected' : ''}>${escapeHtml(name)}</option>`).join('')}
+          </select>
+        </label>
+
+        <div>
+          <span class="${labelClass}">Poradie lokalít</span>
+          <ol id="order-list" class="m-0 mt-1 p-0 list-none grid gap-2">
+            ${userLocations.map((name) => `
+            <li class="order-item flex items-center gap-2 border border-line rounded-xl pl-4 pr-1.5 py-1.5">
+              <input type="hidden" name="order" value="${escapeHtml(name)}">
+              <span class="flex-1 font-semibold min-w-0 truncate">${escapeHtml(name)}</span>
+              <button type="button" class="${moveBtnClass}" data-move="-1" aria-label="Posunúť ${escapeHtml(name)} vyššie">↑</button>
+              <button type="button" class="${moveBtnClass}" data-move="1" aria-label="Posunúť ${escapeHtml(name)} nižšie">↓</button>
+            </li>`).join('')}
+          </ol>
+          <p class="m-0 mt-2 text-xs text-muted">Obľúbené reštaurácie označíš hviezdičkou, zobrazia sa navrchu svojej lokality.</p>
+        </div>
+
+        <div class="flex flex-wrap gap-2">
+          <button type="submit" name="action" value="save" class="flex-1 px-4 py-3 bg-ink text-ground font-bold rounded-xl cursor-pointer border-0 hover:opacity-90">Uložiť</button>
+          <button type="submit" name="action" value="reset_order" class="px-4 py-3 bg-transparent text-ink font-semibold rounded-xl cursor-pointer border border-line-strong hover:border-ink">Predvolené poradie</button>
+        </div>
+      </form>
+
+      <div class="flex justify-end mt-5 pt-4 border-t border-line">
+        <a href="/logout" class="text-sm font-semibold text-muted hover:text-ink no-underline">Odhlásiť sa</a>
+      </div>
+    </div>
+  </div>`;
 
   return `<!doctype html>
 <html lang="sk">
@@ -804,17 +971,18 @@ function renderPublicPage(items, error = null, lastUpdatedAt = null) {
 
     <header class="flex items-center justify-between gap-3 py-5">
       <div class="flex items-center gap-2.5 sm:gap-3 min-w-0">
-        <svg width="40" height="40" viewBox="0 0 40 40" fill="none" aria-hidden="true"><rect width="40" height="40" rx="12" class="fill-ink"/><circle cx="20" cy="21" r="10" stroke-width="2.4" class="stroke-ground"/><path d="M15 12c2-2 8-2 10 0" stroke-width="2.4" stroke-linecap="round" class="stroke-accent"/></svg>
+        <svg width="40" height="40" viewBox="0 0 40 40" fill="none" aria-hidden="true" class="flex-none"><rect width="40" height="40" rx="12" class="fill-ink"/><circle cx="20" cy="21" r="10" stroke-width="2.4" class="stroke-ground"/><path d="M15 12c2-2 8-2 10 0" stroke-width="2.4" stroke-linecap="round" class="stroke-accent"/></svg>
         <span class="font-display font-bold text-lg sm:text-xl tracking-tight truncate">${escapeHtml(SITE_TITLE)}</span>
       </div>
       <div class="flex items-center gap-2 flex-none">
         <button id="theme-toggle" type="button" aria-label="Prepnúť tmavý režim" class="grid place-items-center w-11 h-11 rounded-xl border border-line-strong bg-surface text-ink cursor-pointer hover:border-ink">
           <svg class="dark:hidden" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
           <svg class="hidden dark:block" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
-        </button>
-        <button id="login-open" type="button" class="h-11 px-3.5 sm:px-4.5 rounded-xl border-0 bg-ink text-ground text-[15px] font-semibold cursor-pointer hover:opacity-90">Prihlásiť sa</button>
+        </button>${headerActions}
       </div>
     </header>
+
+    ${flash ? `<div class="pt-2">${message(flash.kind, flash.text)}</div>` : ''}
 
     <section class="flex flex-wrap items-end justify-between gap-8 pt-6 sm:pt-10 pb-8">
       <div class="flex-[1_1_520px] min-w-0">
@@ -844,35 +1012,7 @@ function renderPublicPage(items, error = null, lastUpdatedAt = null) {
       <span>n8n · PostgreSQL · Docker · Raspberry Pi</span>
     </footer>
   </div>
-
-  <div id="login-modal" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/60 p-4">
-    <div role="dialog" aria-modal="true" aria-label="Prihlásenie" class="w-full max-w-md bg-surface text-ink border border-line rounded-3xl shadow-2xl p-6 relative">
-      <button id="login-close" type="button" aria-label="Zavrieť" class="absolute top-4 right-4 grid place-items-center w-10 h-10 rounded-full bg-ground text-muted hover:text-ink cursor-pointer border-0">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>
-      </button>
-
-      <div class="flex gap-2 mb-5">
-        <button type="button" class="${paneBtnClass}" data-pane="login" aria-pressed="true">Prihlásenie</button>
-        <button type="button" class="${paneBtnClass}" data-pane="register" aria-pressed="false">Registrácia</button>
-      </div>
-
-      <form id="pane-login" method="post" action="/admin/login" class="grid gap-3">
-        <label class="block"><span class="${labelClass}">E-mail</span><input type="email" name="email" required autocomplete="username" class="${inputClass}"></label>
-        <label class="block"><span class="${labelClass}">Heslo</span><input type="password" name="password" required autocomplete="current-password" class="${inputClass}"></label>
-        <button type="submit" class="mt-1 w-full px-4 py-3 bg-ink text-ground font-bold rounded-xl cursor-pointer border-0 hover:opacity-90">Prihlásiť</button>
-        <a href="/admin?view=reset" class="text-sm font-semibold text-muted hover:text-ink no-underline justify-self-start">Zabudnuté heslo?</a>
-      </form>
-
-      <form id="pane-register" method="post" action="/admin/register" class="hidden grid gap-3">
-        <p class="m-0 text-sm text-muted">Nový účet musí schváliť admin. Úplne prvý zaregistrovaný účet sa stáva adminom.</p>
-        <label class="block"><span class="${labelClass}">E-mail</span><input type="email" name="email" required autocomplete="username" class="${inputClass}"></label>
-        <label class="block"><span class="${labelClass}">Heslo (min. 8 znakov)</span><input type="password" name="password" required minlength="8" autocomplete="new-password" class="${inputClass}"></label>
-        <label class="block"><span class="${labelClass}">Heslo znova</span><input type="password" name="password_confirm" required minlength="8" autocomplete="new-password" class="${inputClass}"></label>
-        <button type="submit" class="mt-1 w-full px-4 py-3 bg-ink text-ground font-bold rounded-xl cursor-pointer border-0 hover:opacity-90">Registrovať</button>
-      </form>
-    </div>
-  </div>
-
+${loginModal}${prefsModal}
   <script>
     document.querySelectorAll('.restaurant-toggle').forEach((button) => {
       button.addEventListener('click', () => {
@@ -897,47 +1037,82 @@ function renderPublicPage(items, error = null, lastUpdatedAt = null) {
       try { localStorage.setItem('lunch_theme', dark ? 'dark' : 'light'); } catch {}
     });
 
-    const loginModal = document.getElementById('login-modal');
-    function setModalOpen(open) {
-      loginModal.classList.toggle('hidden', !open);
-      loginModal.classList.toggle('flex', open);
-      if (open) loginModal.querySelector('#pane-login input[name="email"]').focus();
+    // Shared modal wiring for the login and "Môj výber" dialogs
+    const modals = [];
+    function bindModal(modalId, openId, closeId, focusSelector) {
+      const modal = document.getElementById(modalId);
+      if (!modal) return;
+      const setOpen = (open) => {
+        modal.classList.toggle('hidden', !open);
+        modal.classList.toggle('flex', open);
+        if (open) modal.querySelector(focusSelector)?.focus();
+      };
+      modals.push(setOpen);
+      document.getElementById(openId)?.addEventListener('click', () => setOpen(true));
+      document.getElementById(closeId)?.addEventListener('click', () => setOpen(false));
+      modal.addEventListener('click', (event) => { if (event.target === modal) setOpen(false); });
     }
+    bindModal('login-modal', 'login-open', 'login-close', 'form:not(.hidden) input[name="email"]');
+    bindModal('prefs-modal', 'prefs-open', 'prefs-close', 'select');
+    document.addEventListener('keydown', (event) => { if (event.key === 'Escape') modals.forEach((setOpen) => setOpen(false)); });
+
     function setPane(name) {
       document.getElementById('pane-login').classList.toggle('hidden', name !== 'login');
       document.getElementById('pane-register').classList.toggle('hidden', name !== 'register');
       document.querySelectorAll('.auth-pane-btn').forEach((btn) => btn.setAttribute('aria-pressed', btn.dataset.pane === name ? 'true' : 'false'));
     }
-    document.getElementById('login-open').addEventListener('click', () => setModalOpen(true));
-    document.getElementById('login-close').addEventListener('click', () => setModalOpen(false));
-    loginModal.addEventListener('click', (event) => { if (event.target === loginModal) setModalOpen(false); });
-    document.addEventListener('keydown', (event) => { if (event.key === 'Escape') setModalOpen(false); });
     document.querySelectorAll('.auth-pane-btn').forEach((btn) => btn.addEventListener('click', () => setPane(btn.dataset.pane)));
+
+    // Drop one-off ?auth=… / ?saved=… params so a reload doesn't show the message again
+    if (location.search) history.replaceState(null, '', location.pathname);
+
+    // Favorites: toggle in place via fetch; fall back to a normal form post
+    document.querySelectorAll('.fav-form').forEach((form) => {
+      form.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        const button = form.querySelector('.fav-btn');
+        try {
+          const res = await fetch(form.action, { method: 'POST', body: new URLSearchParams(new FormData(form)), headers: { accept: 'application/json' } });
+          if (!res.ok) throw new Error(res.statusText);
+          const { favorite } = await res.json();
+          button.setAttribute('aria-pressed', favorite ? 'true' : 'false');
+          button.setAttribute('aria-label', favorite ? 'Odobrať z obľúbených' : 'Pridať do obľúbených');
+        } catch {
+          form.submit();
+        }
+      });
+    });
+
+    // Location order: move items up/down; hidden inputs submit in DOM order
+    const orderList = document.getElementById('order-list');
+    function refreshMoveButtons() {
+      const items = [...orderList.children];
+      items.forEach((item, index) => {
+        item.querySelector('[data-move="-1"]').disabled = index === 0;
+        item.querySelector('[data-move="1"]').disabled = index === items.length - 1;
+      });
+    }
+    if (orderList) {
+      orderList.addEventListener('click', (event) => {
+        const button = event.target.closest('.move-btn');
+        if (!button) return;
+        const item = button.closest('.order-item');
+        if (button.dataset.move === '-1' && item.previousElementSibling) item.previousElementSibling.before(item);
+        if (button.dataset.move === '1' && item.nextElementSibling) item.nextElementSibling.after(item);
+        refreshMoveButtons();
+        button.focus();
+      });
+      refreshMoveButtons();
+    }
   </script>
 </body>
 </html>`;
 }
 
-function renderAuthPage({ view = 'login', error = '', notice = '' } = {}) {
+// Password reset flow; login and registration live in the modal on the home page
+function renderResetPage({ error = '', notice = '' } = {}) {
   const authInput = 'mt-1 w-full border border-gray-300 rounded-xl px-4 py-3 text-base bg-white focus:outline-none focus:ring-2 focus:ring-gray-900';
   const authLabel = 'block text-xs font-bold text-gray-500 uppercase tracking-wide';
-
-  const loginView = `
-    <div class="bg-white border border-gray-200 rounded-3xl shadow-lg p-6">
-      <h1 class="m-0 text-3xl font-black tracking-tight">Admin menu</h1>
-      <p class="mt-1 mb-5 text-sm text-gray-500">Prihlás sa e-mailom a heslom.</p>
-
-      <form method="post" action="/admin/login" class="grid gap-3">
-        <label class="block"><span class="${authLabel}">E-mail</span><input type="email" name="email" required autocomplete="username" autofocus class="${authInput}"></label>
-        <label class="block"><span class="${authLabel}">Heslo</span><input type="password" name="password" required autocomplete="current-password" class="${authInput}"></label>
-        <button type="submit" class="mt-1 w-full px-4 py-3 bg-gray-900 hover:bg-gray-800 text-white font-black rounded-xl cursor-pointer border-0">Prihlásiť</button>
-      </form>
-
-      <div class="flex justify-between mt-4 text-sm">
-        <a href="/admin?view=reset" class="font-bold text-gray-500 hover:text-gray-900 no-underline">Zabudnuté heslo?</a>
-        <a href="/" class="font-bold text-gray-500 hover:text-gray-900 no-underline">← Späť na menu</a>
-      </div>
-    </div>`;
 
   const resetView = `
     <div class="bg-white border border-gray-200 rounded-3xl shadow-lg p-6">
@@ -961,7 +1136,7 @@ function renderAuthPage({ view = 'login', error = '', notice = '' } = {}) {
         <button type="submit" class="mt-1 w-full px-4 py-3 bg-green-600 hover:bg-green-700 text-white font-black rounded-xl cursor-pointer border-0">Zmeniť heslo</button>
       </form>
       <div class="mt-4 text-sm">
-        <a href="/admin" class="font-bold text-gray-500 hover:text-gray-900 no-underline">← Späť na prihlásenie</a>
+        <a href="/?auth=login" class="font-bold text-gray-500 hover:text-gray-900 no-underline">← Späť na prihlásenie</a>
       </div>
     </div>`;
 
@@ -970,7 +1145,7 @@ function renderAuthPage({ view = 'login', error = '', notice = '' } = {}) {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Prihlásenie · ${escapeHtml(SITE_TITLE)}</title>
+  <title>Obnovenie hesla · ${escapeHtml(SITE_TITLE)}</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/tailwind.css">
 </head>
@@ -978,7 +1153,7 @@ function renderAuthPage({ view = 'login', error = '', notice = '' } = {}) {
   <main class="w-full max-w-md">
     ${error ? `<div class="mb-4 px-4 py-3 bg-red-50 border border-red-200 text-red-800 font-semibold rounded-xl text-sm">${escapeHtml(error)}</div>` : ''}
     ${notice ? `<div class="mb-4 px-4 py-3 bg-green-50 border border-green-200 text-green-800 font-semibold rounded-xl text-sm">${escapeHtml(notice)}</div>` : ''}
-    ${view === 'reset' ? resetView : loginView}
+    ${resetView}
   </main>
 </body>
 </html>`;
@@ -1151,7 +1326,7 @@ function renderAdminPage({ items, sources, locations, users = [], currentUser, m
       <div class="flex items-center gap-2 flex-wrap">
         <span class="px-3 py-2 bg-white border border-gray-200 rounded-full text-sm text-gray-600">${escapeHtml(currentUser.email)} <span class="ml-1 px-2 py-0.5 rounded-full text-xs font-bold ${isAdminUser ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-600'}">${isAdminUser ? 'admin' : 'user'}</span></span>
         <a href="/" class="${tw.btnGray} no-underline">Web</a>
-        <a href="/admin/logout" class="${tw.btnGray} no-underline">Odhlásiť</a>
+        <a href="/logout" class="${tw.btnGray} no-underline">Odhlásiť</a>
       </div>
     </div>
 
@@ -1330,27 +1505,35 @@ function renderAdminPage({ items, sources, locations, users = [], currentUser, m
 </html>`;
 }
 
+// Login modal on the home page, opened with an optional message
+function authUrl(pane, { error = '', notice = '' } = {}) {
+  const params = new URLSearchParams({ auth: pane });
+  if (error) params.set('auth_error', error);
+  if (notice) params.set('auth_notice', notice);
+  return `/?${params}`;
+}
+
 async function adminGet(req, res, url) {
   const user = await getSessionUser(req);
   if (!user) {
-    return sendHtml(res, 401, renderAuthPage({
-      view: url.searchParams.get('view') || 'login',
+    if (url.searchParams.get('view') !== 'reset') return redirect(res, authUrl('login'));
+    return sendHtml(res, 200, renderResetPage({
       error: url.searchParams.get('error') || '',
       notice: url.searchParams.get('notice') || '',
     }));
   }
+  if (user.role !== 'admin') return redirect(res, '/');
 
   const menuDate = url.searchParams.get('date') || todayIso();
   const data = await queryAdminData(menuDate);
-  const users = user.role === 'admin' ? await listUsers() : [];
   sendHtml(res, 200, renderAdminPage({
     ...data,
-    users,
+    users: await listUsers(),
     currentUser: user,
     menuDate,
     notice: url.searchParams.get('notice') || '',
     error: url.searchParams.get('error') || '',
-    activeTab: url.searchParams.get('tab') || (user.role === 'admin' ? 'polozky' : 'lokality'),
+    activeTab: url.searchParams.get('tab') || 'polozky',
   }));
 }
 
@@ -1360,9 +1543,9 @@ async function adminPost(req, res, url) {
     try {
       const user = await authenticateUser(form);
       const token = await createSession(user.id);
-      return redirect(res, '/admin', { 'set-cookie': sessionCookie(token) });
+      return redirect(res, '/', { 'set-cookie': sessionCookies(token) });
     } catch (err) {
-      return redirect(res, `/admin?error=${encodeURIComponent(err.message)}`);
+      return redirect(res, authUrl('login', { error: err.message }));
     }
   }
 
@@ -1372,11 +1555,11 @@ async function adminPost(req, res, url) {
       const user = await registerUser(form);
       if (user.is_approved) {
         const token = await createSession(user.id);
-        return redirect(res, '/admin', { 'set-cookie': sessionCookie(token) });
+        return redirect(res, '/', { 'set-cookie': sessionCookies(token) });
       }
-      return redirect(res, `/admin?notice=${encodeURIComponent('Registrácia prebehla. Prihlásiť sa budeš môcť po schválení adminom.')}`);
+      return redirect(res, authUrl('login', { notice: 'Registrácia prebehla. Prihlásiť sa budeš môcť po schválení adminom.' }));
     } catch (err) {
-      return redirect(res, `/admin?error=${encodeURIComponent(err.message)}`);
+      return redirect(res, authUrl('register', { error: err.message }));
     }
   }
 
@@ -1396,24 +1579,20 @@ async function adminPost(req, res, url) {
     const form = await readForm(req);
     try {
       await confirmPasswordReset(form);
-      return redirect(res, `/admin?notice=${encodeURIComponent('Heslo bolo zmenené. Prihlás sa novým heslom.')}`);
+      return redirect(res, authUrl('login', { notice: 'Heslo bolo zmenené. Prihlás sa novým heslom.' }));
     } catch (err) {
       return redirect(res, `/admin?view=reset&error=${encodeURIComponent(err.message)}`);
     }
   }
 
   const user = await getSessionUser(req);
-  if (!user) return redirect(res, `/admin?error=${encodeURIComponent('Neautorizovaný prístup')}`);
+  if (!user) return redirect(res, authUrl('login', { error: 'Prihlás sa, prosím.' }));
+  if (user.role !== 'admin') return redirect(res, '/');
 
   const form = await readForm(req);
   const menuDate = clean(form.menu_date, todayIso());
   const tab = clean(form._tab, 'polozky');
   try {
-    // The 'user' role may only adjust location weights
-    if (user.role !== 'admin' && url.pathname !== '/admin/locations/update') {
-      throw new Error('Na túto akciu potrebuješ rolu admin.');
-    }
-
     if (url.pathname === '/admin/users/approve' || url.pathname === '/admin/users/delete') {
       if (url.pathname === '/admin/users/approve') await approveUser(form);
       else await deleteUser(form, user);
@@ -1430,6 +1609,42 @@ async function adminPost(req, res, url) {
     redirect(res, `/admin?date=${encodeURIComponent(menuDate)}&tab=${encodeURIComponent(tab)}&notice=${encodeURIComponent('Zmena bola uložená.')}`);
   } catch (err) {
     redirect(res, `/admin?date=${encodeURIComponent(menuDate)}&tab=${encodeURIComponent(tab)}&error=${encodeURIComponent(err.message)}`);
+  }
+}
+
+// Logged-in user's own preferences (any approved role)
+async function mePost(req, res, url) {
+  const wantsJson = String(req.headers.accept || '').includes('application/json');
+  const user = await getSessionUser(req);
+  if (!user) {
+    if (wantsJson) {
+      res.writeHead(401, { 'content-type': 'application/json; charset=utf-8' });
+      return res.end(JSON.stringify({ error: 'unauthorized' }));
+    }
+    return redirect(res, authUrl('login', { error: 'Prihlás sa, prosím.' }));
+  }
+
+  const params = new URLSearchParams(await readBody(req));
+  try {
+    if (url.pathname === '/me/favorites/toggle') {
+      const favorite = await toggleFavorite(user.id, clean(params.get('source_id')));
+      if (wantsJson) {
+        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+        return res.end(JSON.stringify({ favorite }));
+      }
+      return redirect(res, '/');
+    }
+    if (url.pathname === '/me/preferences') {
+      await savePreferences(user.id, params);
+      return redirect(res, '/?saved=1');
+    }
+    return sendHtml(res, 404, '<h1>404</h1>');
+  } catch (err) {
+    if (wantsJson) {
+      res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
+      return res.end(JSON.stringify({ error: err.message }));
+    }
+    return redirect(res, `/?error=${encodeURIComponent(err.message)}`);
   }
 }
 
@@ -1454,17 +1669,28 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    if (req.method === 'GET' && url.pathname === '/admin/logout') {
+    // /admin/logout kept for old bookmarks
+    if (req.method === 'GET' && (url.pathname === '/logout' || url.pathname === '/admin/logout')) {
       await destroySession(req);
-      return redirect(res, '/admin', { 'set-cookie': 'lunch_session=; HttpOnly; SameSite=Lax; Path=/admin; Max-Age=0' });
+      return redirect(res, '/', { 'set-cookie': sessionCookies('', 0) });
     }
 
     if (req.method === 'GET' && url.pathname === '/admin') return await adminGet(req, res, url);
     if (req.method === 'POST' && url.pathname.startsWith('/admin/')) return await adminPost(req, res, url);
+    if (req.method === 'POST' && url.pathname.startsWith('/me/')) return await mePost(req, res, url);
 
     if (req.method === 'GET' && url.pathname === '/') {
-      const { items, lastUpdatedAt } = await queryTodayMenu();
-      return sendHtml(res, 200, renderPublicPage(items, null, lastUpdatedAt));
+      const user = await getSessionUser(req);
+      const { items, lastUpdatedAt } = await queryTodayMenu(user?.id ?? null);
+      const param = (name) => url.searchParams.get(name) || '';
+      return sendHtml(res, 200, renderPublicPage(items, {
+        lastUpdatedAt,
+        user,
+        userLocations: user ? await queryUserLocations(user.id) : [],
+        auth: !user && param('auth') ? { pane: param('auth'), error: param('auth_error'), notice: param('auth_notice') } : null,
+        flash: user && param('error') ? { kind: 'error', text: param('error') }
+          : user && param('saved') ? { kind: 'notice', text: 'Tvoj výber bol uložený.' } : null,
+      }));
     }
 
     sendHtml(res, 404, '<h1>404</h1>');
