@@ -28,10 +28,29 @@ n8n / LAN / Tailscale → IP_WEBSERVERA:5434 → obedove-menu-db:5432
 
 ## Spustenie
 
+Image sa na RPI nebuilduje. Zbuilduje ho GitHub Actions ([.github/workflows/docker.yml](.github/workflows/docker.yml)) pri každom pushi do `main` a publikuje ho do `ghcr.io/pidiman/lunch` pre `arm64` aj `amd64`.
+
 ```bash
 cp .env.example .env
 nano .env
-docker compose up -d --build
+docker compose pull
+docker compose up -d
+```
+
+### Release a rollback
+
+Každý commit má vlastný image `ghcr.io/pidiman/lunch:sha-<7 znakov commitu>` a `latest` ukazuje na posledný commit v `main`. Konkrétnu verziu nasadíš (alebo sa k nej vrátiš) cez `.env`:
+
+```env
+IMAGE_TAG=sha-1a2b3c4
+```
+
+Potom spusti `docker compose pull && docker compose up -d`.
+
+### Lokálny build (bez GHCR)
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 ```
 
 ## Lokálny vývoj

@@ -1,5 +1,6 @@
 # Stage 1: build the Tailwind CSS from the classes used in server.js
-FROM node:24-alpine AS assets
+# CSS is platform independent, so build it natively (no QEMU) for multi-arch images
+FROM --platform=$BUILDPLATFORM node:24-alpine AS assets
 
 WORKDIR /build
 COPY package.json package-lock.json ./

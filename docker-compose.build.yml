@@ -1,0 +1,7 @@
+# Local image build instead of pulling from GHCR (development / testing only):
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+services:
+  obedove-menu:
+    build: ./app
+  obedove-menu-migrate:
+    build: ./app

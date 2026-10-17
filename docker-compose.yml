@@ -1,8 +1,8 @@
 services:
   obedove-menu:
-    build: ./app
-    image: obedove-menu:latest
-    container_name: obedove-menu
+    # Built by GitHub Actions (.github/workflows/docker.yml). Pin IMAGE_TAG=sha-xxxxxxx
+    # in .env to deploy or roll back a specific release; local builds: docker-compose.build.yml
+    image: ghcr.io/pidiman/lunch:${IMAGE_TAG:-latest}
     restart: unless-stopped
     environment:
       - DB_HOST=obedove-menu-db
@@ -39,8 +39,7 @@ services:
 
   # One-off admin process: applies DB migrations, then exits before the web app starts
   obedove-menu-migrate:
-    build: ./app
-    image: obedove-menu:latest
+    image: ghcr.io/pidiman/lunch:${IMAGE_TAG:-latest}
     command: ["node", "migrate.js"]
     restart: "no"
     environment:
