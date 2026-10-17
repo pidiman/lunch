@@ -1,0 +1,193 @@
+{
+  "name": "Obedové menu – test zdroja (v4)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "obedove-menu-test-zdroja",
+        "authentication": "headerAuth",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "1d0fd30b-367f-5370-b2ea-f5e1f309f8ed",
+      "name": "Webhook - Test zdroja",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -500,
+        300
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "ObMenuTestToken1",
+          "name": "Obedové menu test token (x-menu-token)"
+        }
+      },
+      "webhookId": "0f020372-c7e0-5a51-a609-36057b5a83eb"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Request from the admin's \"Otestovať\" button: one restaurant (not necessarily saved yet)\nconst body = $input.first().json.body || {};\nconst today = new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Bratislava', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());\nconst menuDate = /^\\d{4}-\\d{2}-\\d{2}$/.test(String(body.menu_date || '')) ? body.menu_date : today;\nreturn [{\n  json: {\n    source_id: String(body.source_id || 'test').slice(0, 60),\n    source_name: String(body.source_name || 'Test').slice(0, 120),\n    source_type: String(body.source_type || ''),\n    source_url: String(body.source_url || ''),\n    parser_name: String(body.parser_name || ''),\n    parser_config: body.parser_config && typeof body.parser_config === 'object' ? body.parser_config : {},\n    has_weekend_menu: body.has_weekend_menu === true,\n    menu_date: menuDate,\n    run_id: `test-${menuDate}-${Math.random().toString(36).slice(2, 8)}`,\n    timeoutMs: 15000,\n    maxItems: 100,\n  },\n}];\n"
+      },
+      "id": "0ce755b3-1f0c-545f-9c74-2b0af63077c2",
+      "name": "Code - Build Source",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -260,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "ObMenuParserV4aa",
+          "mode": "list",
+          "cachedResultName": "Obedové menu – parser reštaurácie (v4)"
+        },
+        "mode": "each",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "id": "86cb0127-f02a-5e10-9550-ee4102692705",
+      "name": "Execute - Parser",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        -20,
+        300
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Small JSON for the admin: what the parser found, nothing is written to the DB\nconst r = $input.first().json;\nconst items = (r.menuItems || []).map((i) => ({ menu_code: i.menu_code, category: i.category, title: i.title, description: i.description, price_eur: i.price_eur, allergens: i.allergens }));\nreturn [{ json: { ok: r.status === 'success', status: r.status || 'failed', itemCount: items.length, items, errorCode: r.errorCode || null, errorMessage: r.errorMessage || null, debug: (r.debugDayLines || []).slice(0, 40) } }];\n"
+      },
+      "id": "e7ba919a-49ee-5c51-afb1-152df5793f89",
+      "name": "Code - Shape Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const row = $input.first().json;\nconst message = typeof row.error === 'string' ? row.error : row.error?.message || row.message || 'Parser workflow zlyhal';\nreturn [{ json: { ok: false, status: 'failed', itemCount: 0, items: [], errorCode: 'PARSER_WORKFLOW_ERROR', errorMessage: String(message).slice(0, 500) } }];\n"
+      },
+      "id": "097c0e74-0b51-50d3-bd74-6267138bb05c",
+      "name": "Code - Parser Error",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        420
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {}
+      },
+      "id": "f77bf7d8-3e64-5681-acc6-cdc44dc60ce9",
+      "name": "Respond - JSON",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        460,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## Test zdroja (v4)\nVolá ho tlačidlo „Otestovať“ v admine (POST s JSON reštaurácie). Spustí parser a vráti nájdené jedlá – nič nezapisuje do DB.\n\nCredential „Obedové menu test token“ = Header Auth, Name `x-menu-token`, Value = rovnaký tajný reťazec ako `N8N_TEST_WEBHOOK_TOKEN` v .env webu.\nProdukčná URL webhooku (po aktivácii) patrí do `N8N_TEST_WEBHOOK_URL`.",
+        "height": 380,
+        "width": 620
+      },
+      "id": "897dad11-f3a7-5389-8796-865fa30cf466",
+      "name": "Poznámky",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -760,
+        -380
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook - Test zdroja": {
+      "main": [
+        [
+          {
+            "node": "Code - Build Source",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code - Build Source": {
+      "main": [
+        [
+          {
+            "node": "Execute - Parser",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execute - Parser": {
+      "main": [
+        [
+          {
+            "node": "Code - Shape Response",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Code - Parser Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code - Shape Response": {
+      "main": [
+        [
+          {
+            "node": "Respond - JSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code - Parser Error": {
+      "main": [
+        [
+          {
+            "node": "Respond - JSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "id": "ObMenuTestV4aaaa",
+  "tags": [],
+  "pinData": {}
+}

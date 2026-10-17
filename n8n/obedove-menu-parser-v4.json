@@ -1,0 +1,718 @@
+{
+  "name": "Obedové menu – parser reštaurácie (v4)",
+  "nodes": [
+    {
+      "parameters": {
+        "inputSource": "passthrough"
+      },
+      "id": "2671145c-3a24-5101-825e-22fdbf3760bd",
+      "name": "Start",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        -560,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// One restaurant per execution (callers run this workflow once per item).\n// Picks the branch by parser_name; manual / weekend / unknown sources finish here without fetching.\nconst src = $input.first().json;\nconst parserName = String(src.parser_name || src.parserName || 'manual');\nconst menuDate = String(src.menu_date || src.menuDate || '');\nlet parserConfig = src.parser_config || src.parserConfig || {};\nif (typeof parserConfig === 'string') {\n  try { parserConfig = JSON.parse(parserConfig || '{}'); } catch { parserConfig = {}; }\n}\nconst hasWeekendMenu = src.has_weekend_menu === true || src.has_weekend_menu === 't' || src.has_weekend_menu === 'true';\nconst ROUTES = { woocommerce_category: 'html', amelia: 'html', sme_restauracie: 'html', zark_pdf: 'zark_pdf', ai_extract: 'ai_extract' };\n\nconst meta = {\n  sourceId: String(src.source_id || src.sourceId || ''),\n  sourceName: String(src.source_name || src.sourceName || src.source_id || ''),\n  sourceType: String(src.source_type || src.sourceType || ''),\n  sourceUrl: String(src.source_url || src.sourceUrl || ''),\n  parserName,\n  parser: parserName,\n  parserConfig,\n  hasWeekendMenu,\n  menuDate,\n  runId: String(src.run_id || src.runId || `${menuDate}-${Math.random().toString(36).slice(2, 10)}`),\n  timeoutMs: Number(src.timeoutMs || 15000),\n  maxItems: Number(src.maxItems || 100),\n  discoveryUrl: parserConfig.discoveryUrl || (parserName === 'zark_pdf' ? 'https://zark.eatbu.com/?lang=sk' : null),\n};\nmeta.run_id = meta.runId;\n\nconst day = new Date(`${menuDate}T12:00:00Z`);\nconst finish = (status, errorCode, errorMessage) => [{\n  json: { ...meta, route: 'done', ok: status === 'skipped', status, stage: 'plan', errorCode, errorMessage, itemCount: 0, menuItems: [] },\n}];\n\nif (!/^\\d{4}-\\d{2}-\\d{2}$/.test(menuDate) || Number.isNaN(day.getTime())) return finish('failed', 'INVALID_MENU_DATE', `Neplatný dátum menu: ${menuDate}`);\nif (!meta.sourceId) return finish('failed', 'MISSING_SOURCE_ID', 'Chýba source_id reštaurácie.');\nif (parserName === 'manual') return finish('skipped', 'MANUAL_SOURCE', 'Jedlá sa zadávajú ručne v admine.');\nif (!ROUTES[parserName]) return finish('failed', 'UNKNOWN_PARSER', `Neznámy typ parsera: ${parserName}`);\nif (!/^https?:\\/\\//i.test(meta.discoveryUrl || meta.sourceUrl)) return finish('failed', 'MISSING_URL', 'Reštaurácia nemá URL stránky s menu.');\nif ([0, 6].includes(day.getUTCDay()) && !hasWeekendMenu) return finish('skipped', 'WEEKEND_NO_MENU', `Cez víkend (${menuDate}) sa menu neočakáva.`);\n\nreturn [{ json: { ...meta, route: ROUTES[parserName] } }];\n"
+      },
+      "id": "b03eb3aa-4063-57cd-8a7c-836821ed93ab",
+      "name": "Code - Plan",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -320,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "expression",
+        "numberOutputs": 4,
+        "output": "={{ ({ done: 0, html: 1, zark_pdf: 2, ai_extract: 3 })[$json.route] ?? 0 }}"
+      },
+      "id": "8e1056c2-78c0-5ba4-ad86-b8033be5a7ff",
+      "name": "Switch - Parser",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        -80,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Plan already decided the outcome (skipped / failed before fetching)\nreturn $input.all();\n"
+      },
+      "id": "72b23354-65bc-509b-9a61-dbb7f952bbc8",
+      "name": "Result - Bez sťahovania",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        200,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.sourceUrl }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/126 Safari/537.36 n8n-menu-ingestion"
+            },
+            {
+              "name": "Accept",
+              "value": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            },
+            {
+              "name": "Accept-Language",
+              "value": "sk-SK,sk;q=0.9,cs;q=0.8,en;q=0.7"
+            },
+            {
+              "name": "Cache-Control",
+              "value": "no-cache"
+            }
+          ]
+        },
+        "options": {
+          "redirect": {
+            "redirect": {
+              "maxRedirects": 5
+            }
+          },
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          },
+          "timeout": "={{ $json.timeoutMs }}"
+        }
+      },
+      "id": "cdcdd51e-ad2a-57f0-b3ea-03d211696dcd",
+      "name": "HTTP - Fetch HTML",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        200,
+        200
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// HTML parsers, chosen by parser_name. Input: the fetched page (HTTP node, text response).\n// Output: one result per restaurant in the shape the import audit expects.\nconst meta = $('Code - Plan').first().json;\nconst response = $input.first().json;\n\nfunction decodeEntities(s) {\n  return String(s || '')\n    .replace(/&nbsp;|&#160;| /g, ' ')\n    .replace(/&#8211;|&ndash;|&#8212;|&mdash;/g, '–')\n    .replace(/&amp;/g, '&')\n    .replace(/&quot;/g, '\"')\n    .replace(/&#039;|&apos;/g, \"'\")\n    .replace(/&euro;/g, '€')\n    .replace(/&#(\\d+);/g, (_, n) => String.fromCharCode(Number(n)))\n    .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCharCode(parseInt(n, 16)))\n    .trim();\n}\n\nfunction cleanText(s) {\n  return decodeEntities(s)\n    .replace(/\\s+/g, ' ')\n    .replace(/\\bPridať do košíka\\b/gi, '')\n    .replace(/\\bKúpiť\\b/gi, '')\n    .replace(/\\bSelect options\\b/gi, '')\n    .replace(/\\bAdd to cart\\b/gi, '')\n    .trim();\n}\n\nfunction htmlToLines(html) {\n  return String(html || '')\n    .replace(/<script[\\s\\S]*?<\\/script>/gi, ' ')\n    .replace(/<style[\\s\\S]*?<\\/style>/gi, ' ')\n    .replace(/<noscript[\\s\\S]*?<\\/noscript>/gi, ' ')\n    .replace(/<br\\s*\\/?\\s*>/gi, '\\n')\n    .replace(/<\\/\\s*(h\\d|p|li|div|article|section|span|a|strong|em|ul|ol|td|tr)>/gi, '\\n')\n    .replace(/<[^>]+>/g, ' ')\n    .split(/\\n+/)\n    .map(cleanText)\n    .filter(Boolean);\n}\n\nfunction hashString(s) {\n  let h = 2166136261;\n  for (const ch of String(s)) {\n    h ^= ch.charCodeAt(0);\n    h = Math.imul(h, 16777619);\n  }\n  return (h >>> 0).toString(16);\n}\n\nfunction toPrice(value) {\n  const m = String(value || '').replace(/ /g, ' ').match(/([0-9]+)\\s*[,.]\\s*([0-9]{2})/);\n  return m ? Number(`${m[1]}.${m[2]}`) : null;\n}\n\nfunction extractAllergens(raw) {\n  const out = new Set();\n  const parens = String(raw || '').match(/\\(([^)]*\\d[^)]*)\\)/g) || [];\n  for (const p of parens) for (const n of p.match(/\\b\\d{1,2}\\b/g) || []) out.add(n);\n  const explicit = String(raw || '').match(/alerg[eé]ny:?\\s*((?:\\d{1,2}\\s*,?\\s*)+)/i);\n  if (explicit) for (const n of explicit[1].match(/\\b\\d{1,2}\\b/g) || []) out.add(n);\n  return [...out];\n}\n\nfunction isNoise(line) {\n  const l = cleanText(line);\n  if (!l) return true;\n  if (/^(Domov|Menu|Ponuka|Denné menu|Polievky|Pizza|Nápoje|Dezerty|Kontakt|Košík|Pokladňa|Môj účet|Prihlásenie|Registrovať sa|Zobrazené všetky položky|Načítavanie\\.\\.\\.|Created by)$/i.test(l)) return true;\n  if (/^(Pridať do košíka|Kúpiť|Select options|Add to cart|Tlačiť menu|Zoznam alergénov|Jedálny lístok)$/i.test(l)) return true;\n  if (/^Showing \\d+ to \\d+ of \\d+/i.test(l)) return true;\n  if (/cookie|súhlas|ochrana osobných údajov|technické uloženie|marketing|štatistiky/i.test(l)) return true;\n  return false;\n}\n\n// Common item shape written to lunch_menu_items\nfunction makeItem(item) {\n  const title = cleanText(item.title);\n  const price = typeof item.price === 'number' ? item.price : toPrice(item.price);\n  if (!title || title.length < 3 || price === null || Number.isNaN(price)) return null;\n  if (/košíka|select options|kúpiť|showing|cookie/i.test(title)) return null;\n  const menuCode = item.menu_code || null;\n  const identity = `${meta.sourceId}|${meta.menuDate}|${menuCode || ''}|${title}|${price}`;\n  return {\n    source_id: meta.sourceId,\n    source_name: meta.sourceName,\n    source_type: meta.sourceType,\n    source_url: meta.sourceUrl,\n    menu_date: meta.menuDate,\n    item_uid: `${meta.sourceId}-${meta.menuDate}-${hashString(identity)}`,\n    menu_code: menuCode,\n    category: item.category || 'main',\n    title,\n    description: cleanText(item.description || ''),\n    price_eur: price,\n    currency: 'EUR',\n    allergens: item.allergens || extractAllergens(item.raw || ''),\n    raw_text: cleanText(item.raw || `${title} ${price} €`),\n    parsed_at: new Date().toISOString(),\n    run_id: meta.runId,\n  };\n}\n\n// ---------- woocommerce_category (e.g. BelaVery): \"01 – Title ... 7,90 €\" ----------\nfunction parseWoocommerce(html) {\n  const lines = htmlToLines(html).filter((l) => !isNoise(l));\n  const items = [];\n  const candidates = [];\n  for (let i = 0; i < lines.length; i++) {\n    const titleMatch = lines[i].match(/^\\s*(\\d{1,2})\\s*[–—-]\\s*(.+)$/);\n    if (!titleMatch) continue;\n    let titleLine = titleMatch[2];\n    let price = toPrice(titleLine);\n    const desc = [];\n    if (price !== null) {\n      titleLine = cleanText(titleLine.replace(/\\s*[0-9]+\\s*[,.]\\s*[0-9]{2}\\s*€?.*$/i, ''));\n    } else {\n      for (let j = i + 1; j < Math.min(lines.length, i + 12); j++) {\n        if (/^\\s*\\d{1,2}\\s*[–—-]\\s*/.test(lines[j])) break;\n        const p = toPrice(lines[j]);\n        if (p !== null) { price = p; break; }\n        if (!isNoise(lines[j])) desc.push(lines[j]);\n      }\n    }\n    candidates.push({ line: lines[i], titleLine, price });\n    const item = makeItem({ menu_code: titleMatch[1].padStart(2, '0'), title: titleLine, description: desc.join(' '), price, raw: `${lines[i]} ${desc.join(' ')}` });\n    if (item) items.push(item);\n  }\n  return { items, lines, candidates };\n}\n\n// ---------- amelia: weekly page with day blocks, weekly specials and a weekend menu ----------\nconst SK_DAYS = ['nedeľa', 'pondelok', 'utorok', 'streda', 'štvrtok', 'piatok', 'sobota'];\nconst EN_DAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];\n\nfunction skDate(iso) {\n  const [y, m, d] = iso.split('-').map(Number);\n  return { y, m, d, text: `${d}.${m}.${y}` };\n}\nfunction dateOnLine(line) {\n  const m = line.match(/^(\\d{1,2})\\.\\s*(\\d{1,2})\\.\\s*(\\d{4})$/);\n  return m ? `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}` : null;\n}\nconst isDayName = (line) => SK_DAYS.includes(line.toLowerCase());\nconst isWeightLine = (line) => /^\\d+(?:[.,]\\d+)?\\s*(?:g|kg|l|ml)$/i.test(line) || /^\\d+g\\/\\d+g$/i.test(line);\nconst isPriceLine = (line) => /^\\d+\\s*[,.]\\s*\\d{2}\\s*€$/.test(line);\n\n// Items in a block: [code \"1.\"] [weight] title… [category] [Alergény: …] price\nfunction ameliaItems(block, description) {\n  const items = [];\n  let current = null;\n  const start = () => (current ||= { titleParts: [], raw: [] });\n  for (const line of block) {\n    if (/^\\d{1,2}\\.$/.test(line)) { start().code = line.replace('.', '').padStart(2, '0'); continue; }\n    if (isWeightLine(line)) {\n      // A second weight inside one priced item = combo (e.g. soup + main for one price)\n      if (current?.titleParts.length) current.titleParts.push('+');\n      start().weight ||= line;\n      current.raw.push(line);\n      continue;\n    }\n    if (/^polievka$/i.test(line)) { start().category = 'soup'; continue; }\n    if (/^hlavné jedlo$/i.test(line)) { start().category = 'main'; continue; }\n    if (/^alerg[eé]ny:/i.test(line)) { start().allergens = extractAllergens(line); current.raw.push(line); continue; }\n    if (isPriceLine(line)) {\n      if (current && current.titleParts.length) {\n        const title = current.titleParts.join(' ').replace(/\\s+\\+\\s+/g, ' + ');\n        const isSoup = !description && (current.category === 'soup' || (!current.category && /polievka|vývar|krém/i.test(title) && /l$/i.test(current.weight || '')));\n        const item = makeItem({\n          menu_code: current.code || (isSoup ? 'P' : null),\n          title,\n          description: [current.weight, description].filter(Boolean).join(' · '),\n          price: toPrice(line),\n          category: isSoup ? 'soup' : description ? 'special' : current.category || 'main',\n          allergens: current.allergens || extractAllergens(title),\n          raw: [...current.raw, title, line].join(' '),\n        });\n        if (item) items.push(item);\n      }\n      current = null;\n      continue;\n    }\n    start().titleParts.push(line);\n    current.raw.push(line);\n  }\n  return items;\n}\n\nfunction parseAmelia(html) {\n  const lines = htmlToLines(html);\n  const target = meta.menuDate;\n  const weekday = EN_DAYS[new Date(`${target}T12:00:00Z`).getUTCDay()];\n  const endIdx = lines.findIndex((l) => /^Denné menu podávame/i.test(l));\n  const end = endIdx >= 0 ? endIdx : lines.length;\n\n  // Day blocks start with a weekday name followed by its date on the next line\n  const dayStarts = [];\n  for (let i = 0; i < end - 1; i++) if (isDayName(lines[i]) && dateOnLine(lines[i + 1])) dayStarts.push({ i, date: dateOnLine(lines[i + 1]) });\n\n  const items = [];\n  const dayStart = dayStarts.find((d) => d.date === target);\n  let closed = false;\n  if (dayStart) {\n    const next = dayStarts.find((d) => d.i > dayStart.i);\n    const block = lines.slice(dayStart.i + 2, next ? next.i : end);\n    if (block.some((l) => /^zatvoren[ée]/i.test(l))) closed = true;\n    else items.push(...ameliaItems(block, ''));\n  }\n\n  // The page covers one week (\"Denné menu\" 12.10. - 18.10.2026); specials only apply inside it\n  const weekIdx = lines.findIndex((l, k) => /^\\d{1,2}\\.\\d{1,2}\\.$/.test(l) && lines[k + 1] === '-' && dateOnLine(lines[k + 2] || ''));\n  let inWeek = true;\n  if (weekIdx >= 0) {\n    const weekEnd = dateOnLine(lines[weekIdx + 2]);\n    const [sd, sm] = lines[weekIdx].split('.').map(Number);\n    const weekStart = `${weekEnd.slice(0, 4)}-${String(sm).padStart(2, '0')}-${String(sd).padStart(2, '0')}`;\n    inWeek = target >= (weekStart <= weekEnd ? weekStart : `${Number(weekEnd.slice(0, 4)) - 1}${weekStart.slice(4)}`) && target <= weekEnd;\n  }\n\n  // \"Platné dni:\" sections (weekly special, weekend menu) before the first day block\n  const firstDay = dayStarts.length ? dayStarts[0].i : end;\n  const sections = [];\n  for (let i = 0; i < firstDay; i++) if (/^Platné dni:?$/i.test(lines[i])) sections.push(i);\n  sections.forEach((i, n) => {\n    const days = (lines[i + 1] || '').toLowerCase().split(/\\s*,\\s*/);\n    if (!inWeek || !days.includes(weekday)) return;\n    let j = i + 2;\n    const from = dateOnLine(lines[j] || '');\n    let to = null;\n    if (from && lines[j + 1] === '-' && dateOnLine(lines[j + 2] || '')) { to = dateOnLine(lines[j + 2]); j += 3; }\n    if (from && (target < from || target > (to || from))) return;\n    // Section label is the line(s) just above \"Platné dni:\", e.g. \"Týždenný špeciál\" / \"Víkendové menu\"\n    const label = lines[i - 1] || 'Špeciál';\n    const stop = sections[n + 1] !== undefined ? sections[n + 1] - 2 : firstDay;\n    items.push(...ameliaItems(lines.slice(j, stop), label));\n  });\n\n  if (closed && !items.length) {\n    return { items, lines, skipped: true, errorCode: 'RESTAURANT_CLOSED', errorMessage: `Reštaurácia má ${skDate(target).text} zatvorené.` };\n  }\n  return { items, lines, candidates: { dayFound: Boolean(dayStart), sections: sections.length } };\n}\n\n// ---------- sme_restauracie: restauracie.sme.sk \"denné menu\" page ----------\nfunction normalizeNoAccents(value) {\n  return String(value || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');\n}\nfunction parseSme(html) {\n  const lines = htmlToLines(html);\n  if (lines.some((l) => /security verification|captcha/i.test(l))) {\n    return { items: [], lines, errorCode: 'BLOCKED_BY_CAPTCHA', errorMessage: 'SME zobrazilo overenie (captcha) namiesto menu, automatické čítanie je zablokované.' };\n  }\n  const [y, m, d] = meta.menuDate.split('-');\n  const variants = [`${d}.${m}.${y}`, `${Number(d)}.${Number(m)}.${y}`, `${Number(d)}. ${Number(m)}. ${y}`, `${d}.${m}.`, `${Number(d)}.${Number(m)}.`].map(normalizeNoAccents);\n  const dayName = normalizeNoAccents(['nedela', 'pondelok', 'utorok', 'streda', 'stvrtok', 'piatok', 'sobota'][new Date(`${meta.menuDate}T12:00:00Z`).getUTCDay()]);\n  const norm = lines.map(normalizeNoAccents);\n  const anchor = norm.findIndex((l) => l.includes(dayName) || variants.some((v) => l.includes(v)) || /\\bdnes\\b/.test(l));\n  const dayNames = ['pondelok', 'utorok', 'streda', 'stvrtok', 'piatok', 'sobota', 'nedela'];\n  let block = lines;\n  if (anchor >= 0) {\n    let stop = Math.min(lines.length, anchor + 100);\n    for (let i = anchor + 1; i < stop; i++) if (dayNames.some((n) => n !== dayName && norm[i].startsWith(n))) { stop = i; break; }\n    block = lines.slice(anchor, stop);\n  }\n  const items = [];\n  let counter = 1;\n  for (const raw of block) {\n    const line = raw.replace(/^[-–•]\\s*/, '').trim();\n    if (!/(\\d{1,2})\\s*[,.]\\s*(\\d{2})\\s*(?:€|eur)/i.test(line)) continue;\n    const title = line.replace(/(\\d{1,2})\\s*[,.]\\s*(\\d{2})\\s*(?:€|eur)/ig, '').replace(/^\\s*(?:menu\\s*)?[0-9]{1,2}\\s*[.)/:=-]\\s*/i, '').trim();\n    const code = (line.match(/^\\s*(?:menu\\s*)?([0-9]{1,2})\\s*[.)/:=-]/i) || [])[1];\n    let category = 'main';\n    if (/polievka|vývar|vyvar|soup/i.test(title)) category = 'soup';\n    const item = makeItem({ menu_code: (code || String(counter)).padStart(2, '0'), title, price: toPrice(line), category, raw: line });\n    if (item) { items.push(item); counter++; }\n  }\n  return { items, lines, block };\n}\n\nconst PARSERS = { woocommerce_category: parseWoocommerce, amelia: parseAmelia, sme_restauracie: parseSme };\n\nfunction result(extra) {\n  return {\n    sourceId: meta.sourceId,\n    sourceName: meta.sourceName,\n    sourceType: meta.sourceType,\n    sourceUrl: meta.sourceUrl,\n    parser: meta.parserName,\n    menuDate: meta.menuDate,\n    runId: meta.runId,\n    run_id: meta.runId,\n    fetchedAt: new Date().toISOString(),\n    ...extra,\n  };\n}\n\nconst html = typeof response.data === 'string' ? response.data\n  : typeof response.body === 'string' ? response.body\n  : Object.values(response).find((v) => typeof v === 'string' && v.length > 300) || '';\n\nif (response.error || !html) {\n  const message = String(response.error?.message || response.error || 'Prázdna odpoveď zo servera');\n  const blocked = /\\b403\\b/.test(message);\n  return [{ json: result({\n    ok: false, status: 'failed', stage: 'fetch',\n    errorCode: blocked ? 'BLOCKED_HTTP_403' : 'HTTP_FETCH_FAILED',\n    errorMessage: (blocked ? 'Web vrátil 403 – pravdepodobne blokuje automatické čítanie (captcha/ochrana proti botom). ' : '') + message.slice(0, 500),\n    itemCount: 0, menuItems: [],\n  }) }];\n}\n\nconst parse = PARSERS[meta.parserName];\nif (!parse) {\n  return [{ json: result({ ok: false, status: 'failed', stage: 'parse', errorCode: 'UNKNOWN_PARSER', errorMessage: `Neznámy HTML parser: ${meta.parserName}`, itemCount: 0, menuItems: [] }) }];\n}\n\nconst parsed = parse(html);\nconst items = [...new Map(parsed.items.map((i) => [i.item_uid, i])).values()].slice(0, meta.maxItems || 100);\nconst ok = items.length > 0;\nreturn [{\n  json: result({\n    ok: ok || Boolean(parsed.skipped),\n    status: ok ? 'success' : parsed.skipped ? 'skipped' : 'failed',\n    stage: 'parse',\n    errorCode: ok ? null : parsed.errorCode || 'NO_MENU_ITEMS_PARSED',\n    errorMessage: ok ? null : parsed.errorMessage || `Pre ${meta.sourceName} sa na ${meta.menuDate} nenašli žiadne jedlá.`,\n    itemCount: items.length,\n    menuItems: items,\n    debugDayLines: (parsed.block || parsed.lines || []).slice(0, 120),\n  }),\n}];\n"
+      },
+      "id": "cfc88de0-c849-5f7d-8a43-fc929389f626",
+      "name": "Result - Parse HTML",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.discoveryUrl }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/126 Safari/537.36 n8n-menu-ingestion"
+            },
+            {
+              "name": "Accept",
+              "value": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            },
+            {
+              "name": "Accept-Language",
+              "value": "sk-SK,sk;q=0.9,cs;q=0.8,en;q=0.7"
+            },
+            {
+              "name": "Cache-Control",
+              "value": "no-cache"
+            }
+          ]
+        },
+        "options": {
+          "redirect": {
+            "redirect": {
+              "followRedirects": false
+            }
+          },
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "responseFormat": "text"
+            }
+          },
+          "timeout": "={{ Math.min(30000, Math.max(1000, Number($json.timeoutMs) || 15000)) }}"
+        }
+      },
+      "id": "1f7b472a-81b2-53d0-bad1-2f5944ea98d7",
+      "name": "HTTP - ZARK Homepage",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        200,
+        420
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Fail closed: never fall back to last week's hardcoded PDF.\nconst meta = $('Code - Plan').first().json;\nconst response = $input.first().json;\nif (Number(response.statusCode) !== 200) throw new Error('ZARK_DISCOVERY_HTTP_STATUS: ' + response.statusCode);\nconst html = response.body ?? response.data;\nif (typeof html !== 'string' || !html.length || html.length > 2 * 1024 * 1024) throw new Error('ZARK_DISCOVERY_INVALID_HTML_SIZE');\nconst decoded = html.replace(/&amp;/gi, '&').replace(/&quot;/gi, '\"').replace(/&#(?:0*39|x0*27);/gi, \"'\")\n .replace(/&#(\\d+);/g, (_, n) => String.fromCharCode(Number(n)))\n .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCharCode(parseInt(n,16)))\n .replace(/\\\\u002f/gi, '/').replace(/\\\\\\//g, '/');\nconst found = [];\nfor (const m of decoded.matchAll(/(?:href|data-src|data-url|src)\\s*=\\s*[\"']([^\"']+)[\"']/gi)) found.push(m[1]);\nfor (const m of decoded.matchAll(/(?:[a-z][a-z0-9+.-]*:)?\\/\\/[^\\s\"'<>\\\\]+/gi)) found.push(m[0]);\nconst urls = new Set();\nfor (let candidate of found) {\n try { candidate = decodeURIComponent(candidate.trim()); } catch { continue; }\n if (candidate.startsWith('//')) candidate = 'https:' + candidate;\n // Anchored allowlist: no credentials, ports, suffix hosts, alternate protocol or path traversal.\n const match = candidate.match(/^https:\\/\\/cdn\\.website\\.dish\\.co(\\/media\\/[a-f0-9]{2}\\/[a-f0-9]{2}\\/\\d+\\/Tyzdenne-menu\\.pdf)(?:\\?[^\\s\"'<>#\\\\]*)?(?:#[^\\s\"'<>\\\\]*)?$/i);\n if (match) urls.add('https://cdn.website.dish.co' + match[1]);\n}\nif (urls.size !== 1) throw new Error(`ZARK_DISCOVERY_EXPECTED_ONE_PDF: found ${urls.size}; ${JSON.stringify([...urls])}`);\nconst pdfUrl = [...urls][0];\nconst resolvedAt = new Date().toISOString();\nconsole.log(JSON.stringify({event:'zark_pdf_resolved',runId:meta.runId,pdfUrl,resolvedAt}));\nreturn [{json:{...meta,sourceUrl:pdfUrl,pdfUrl,discoveryUrl:meta.discoveryUrl,resolvedAt,stage:'zark_discovery',status:'resolved'},pairedItem:{item:0}}];\n"
+      },
+      "id": "c9ef9ede-71c0-572f-95cb-938bbccc35be",
+      "name": "Code - ZARK Resolve PDF URL",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        420
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.sourceUrl }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/126 Safari/537.36 n8n-menu-ingestion"
+            },
+            {
+              "name": "Accept",
+              "value": "application/pdf,*/*;q=0.8"
+            },
+            {
+              "name": "Cache-Control",
+              "value": "no-cache"
+            }
+          ]
+        },
+        "options": {
+          "redirect": {
+            "redirect": {
+              "followRedirects": false
+            }
+          },
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "responseFormat": "file"
+            }
+          },
+          "timeout": "={{ Math.min(30000, Math.max(1000, Number($json.timeoutMs) || 15000)) }}"
+        }
+      },
+      "id": "5f619688-d3c7-54d6-9933-2fca52ed80dc",
+      "name": "HTTP - Fetch PDF Source",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        680,
+        420
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first();\nconst meta = $('Code - ZARK Resolve PDF URL').first().json;\nif (Number(item.json.statusCode) !== 200) throw new Error('ZARK_PDF_HTTP_STATUS: ' + item.json.statusCode);\nconst headers = item.json.headers || {};\nconst type = String(headers['content-type'] || headers['Content-Type'] || '').split(';')[0].trim().toLowerCase();\nif (type !== 'application/pdf') throw new Error('ZARK_PDF_CONTENT_TYPE: ' + type);\nconst declared = Number(headers['content-length'] || headers['Content-Length'] || 0);\nconst maxBytes = 8 * 1024 * 1024;\nif (declared > maxBytes) throw new Error('ZARK_PDF_TOO_LARGE');\nif (!item.binary?.data) throw new Error('ZARK_PDF_BINARY_MISSING');\nconst buffer = await this.helpers.getBinaryDataBuffer(0, 'data');\nif (buffer.length < 8 || buffer.length > maxBytes) throw new Error('ZARK_PDF_INVALID_SIZE: ' + buffer.length);\nif (buffer.subarray(0,5).toString('ascii') !== '%PDF-') throw new Error('ZARK_PDF_INVALID_SIGNATURE');\nconsole.log(JSON.stringify({event:'zark_pdf_validated',runId:meta.runId,pdfUrl:meta.pdfUrl,bytes:buffer.length,contentType:type}));\nreturn [{json:{...meta,pdfBytes:buffer.length,contentType:type,stage:'zark_pdf_validated'},binary:item.binary,pairedItem:{item:0}}];\n"
+      },
+      "id": "5185e799-f217-5b09-b60b-b706c911b1bb",
+      "name": "Code - ZARK Validate PDF",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        920,
+        420
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "operation": "pdf",
+        "options": {}
+      },
+      "id": "a2d31039-f26c-5d52-85ab-61cf75d5e794",
+      "name": "Extract - PDF Text",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1,
+      "position": [
+        1160,
+        420
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 1000,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Validate only the menu heading: never infer the week from HTTP Last-Modified or the URL.\nconst item = $input.first();\nconst meta = $('Code - ZARK Resolve PDF URL').first().json;\nconst fields = [item.json.text, item.json.data, item.json.content, item.json.extractedText, item.json.output];\nconst text = fields.find(s => typeof s === 'string' && /ZARK/i.test(s));\nif (!text) throw new Error('ZARK_WEEK_TEXT_MISSING: PDF extractor returned no readable ZARK text');\n\n// ZARK daily lunch is not expected on Saturday/Sunday; weekday freshness checks below remain unchanged.\nconst weekendRef = String(meta.menuDate || '');\nconst weekendDate = new Date(weekendRef + 'T12:00:00Z');\nif (/^\\d{4}-\\d{2}-\\d{2}$/.test(weekendRef) && Number.isFinite(weekendDate.getTime()) && weekendDate.toISOString().slice(0,10) === weekendRef && [0,6].includes(weekendDate.getUTCDay())) {\n console.log(JSON.stringify({event:'zark_week_check_skipped',runId:meta.runId,menuDate:weekendRef,reason:'WEEKEND_NO_MENU'}));\n return [{json:{...item.json,weekValidation:{status:'skipped',reason:'WEEKEND_NO_MENU',checkedAt:new Date().toISOString()}},pairedItem:{item:0}}];\n}\n\nconst normalized = text.normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[‐-―−]/g,'-').replace(/ /g,' ');\nconst dayOffset = normalized.search(/\\b(?:Pondelok|Utorok|Streda|Stvrtok|Piatok)\\s*:/i);\nconst heading = normalized.slice(0, dayOffset >= 0 ? dayOffset : 4000).replace(/\\s+/g,' ');\nconst iso = ms => new Date(ms).toISOString().slice(0,10);\nfunction date(y,m,d) {\n const ms = Date.UTC(y,m-1,d), x = new Date(ms);\n if (x.getUTCFullYear()!==y || x.getUTCMonth()!==m-1 || x.getUTCDate()!==d) return null;\n return ms;\n}\nconst dayMs = 86400000;\nconst ref = String(meta.menuDate || '');\nif (!/^\\d{4}-\\d{2}-\\d{2}$/.test(ref)) throw new Error('ZARK_WEEK_INVALID_REFERENCE_DATE');\nconst [yr,mo,dy] = ref.split('-').map(Number), reference = date(yr,mo,dy);\nif (reference === null) throw new Error('ZARK_WEEK_INVALID_REFERENCE_DATE');\nconst monday = reference - ((new Date(reference).getUTCDay()+6)%7)*dayMs;\nconst expectedWeek = {monday:iso(monday),sunday:iso(monday+6*dayMs)};\nconst pattern = /(\\d{1,2})\\.\\s*(?:(\\d{1,2})\\.\\s*)?(?:(\\d{4})\\s*)?-\\s*(\\d{1,2})\\.\\s*(\\d{1,2})\\.(?:\\s*(\\d{4}))?/g;\nconst ranges = new Map();\nfor (const m of heading.matchAll(pattern)) {\n const d1=Number(m[1]), m1=Number(m[2]||m[5]), y1=Number(m[3]||0);\n const d2=Number(m[4]), m2=Number(m[5]), y2=Number(m[6]||0);\n const rollsYear = m1 > m2;\n const starts = y1 ? [y1] : y2 ? [y2-(rollsYear?1:0)] : [yr-1,yr,yr+1];\n const options = starts.map(y => {\n  const start = date(y,m1,d1), end = date(y2 || y+(rollsYear?1:0),m2,d2);\n  return {start,end};\n }).filter(r => r.start!==null && r.end!==null && r.end>=r.start && r.end-r.start<=6*dayMs);\n if (!options.length) throw new Error('ZARK_WEEK_INVALID_RANGE: '+m[0]);\n options.sort((a,b)=>Math.abs((a.start+a.end)/2-reference)-Math.abs((b.start+b.end)/2-reference));\n const r=options[0];\n ranges.set(iso(r.start)+'/'+iso(r.end),{...r,header:m[0],yearInferred:!y1&&!y2});\n}\nif (ranges.size!==1) throw new Error(`ZARK_WEEK_RANGE_MISSING_OR_AMBIGUOUS: ${ranges.size} ranges; expected ${JSON.stringify(expectedWeek)}; heading=${heading.slice(0,350)}`);\nconst range=[...ranges.values()][0];\nconst actualMonday=range.start-((new Date(range.start).getUTCDay()+6)%7)*dayMs;\nif (actualMonday!==monday || range.end>monday+6*dayMs || reference<range.start || reference>range.end) {\n throw new Error(`ZARK_WEEK_MISMATCH: PDF ${iso(range.start)}..${iso(range.end)}; expected week ${expectedWeek.monday}..${expectedWeek.sunday}; menuDate=${ref}`);\n}\nconst weekValidation={ok:true,expectedWeek,pdfStart:iso(range.start),pdfEnd:iso(range.end),yearInferred:range.yearInferred,header:range.header,checkedAt:new Date().toISOString()};\nconsole.log(JSON.stringify({event:'zark_week_validated',runId:meta.runId,pdfUrl:meta.pdfUrl,...weekValidation}));\nreturn [{json:{...item.json,weekValidation},pairedItem:{item:0}}];\n"
+      },
+      "id": "ab43a890-31c3-51b1-a016-bc17c5101457",
+      "name": "Code - ZARK Validate Week",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1400,
+        420
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const sourceMeta = $('Code - ZARK Resolve PDF URL').first().json;\n\nfunction getPdfText(item) {\n  const json = item.json || {};\n  const candidates = [json.text, json.data, json.content, json.extractedText, json.output];\n  for (const candidate of candidates) {\n    if (typeof candidate === 'string' && candidate.includes('ZARK')) return candidate;\n  }\n  const flat = JSON.stringify(json || {});\n  if (flat.includes('ZARK') && flat.includes('Denné menu')) {\n    return flat.replace(/\\\\n/g, '\\n').replace(/\\\\\"/g, '\"');\n  }\n  return '';\n}\n\nfunction cleanLine(value) {\n  return String(value || '')\n    .replace(/\\r/g, '')\n    .replace(/[\\u0000-\\u001F\\u007F]/g, ' ')\n    .replace(/\\s+/g, ' ')\n    .trim();\n}\n\nfunction getWantedDay(menuDate) {\n  const date = new Date(`${menuDate}T12:00:00Z`);\n  const day = date.getUTCDay();\n  const map = { 1: 'Pondelok', 2: 'Utorok', 3: 'Streda', 4: 'Štvrtok', 5: 'Piatok' };\n  return map[day] || null;\n}\n\nfunction priceToNumber(value) {\n  const match = String(value || '').match(/(\\d+)\\s*,\\s*(\\d{2})\\s*€/);\n  if (!match) return null;\n  return Number(`${match[1]}.${match[2]}`);\n}\nfunction isPriceLine(line) { return /^\\d+\\s*,\\s*\\d{2}\\s*€$/.test(line); }\nfunction isAllergenLine(line) { return /^\\d{1,2}(?:\\s*,\\s*\\d{1,2})*$/.test(line); }\nfunction extractAllergens(line) {\n  if (!line || !isAllergenLine(line)) return [];\n  return line.split(',').map(v => v.trim()).filter(Boolean);\n}\nfunction hashString(str) {\n  let hash = 2166136261;\n  const input = String(str || '');\n  for (let i = 0; i < input.length; i++) {\n    hash ^= input.charCodeAt(i);\n    hash = Math.imul(hash, 16777619);\n  }\n  return (hash >>> 0).toString(16);\n}\nfunction splitDayBlock(lines, wantedDay) {\n  const days = ['Pondelok', 'Utorok', 'Streda', 'Štvrtok', 'Stvrtok', 'Piatok'];\n  const startIndex = lines.findIndex(line => line.startsWith(`${wantedDay}:`) || (wantedDay === 'Štvrtok' && line.startsWith('Stvrtok:')));\n  if (startIndex === -1) return [];\n  let endIndex = lines.length;\n  for (let i = startIndex + 1; i < lines.length; i++) {\n    if (days.some(day => lines[i].startsWith(`${day}:`))) { endIndex = i; break; }\n  }\n  return lines.slice(startIndex, endIndex);\n}\nfunction parseSoup(firstLine, nextLine) {\n  const match = firstLine.match(/^(Pondelok|Utorok|Streda|Štvrtok|Stvrtok|Piatok):\\s*(.+)$/);\n  if (!match) return null;\n  const title = cleanLine(match[2]);\n  return {\n    menu_code: 'P',\n    category: 'soup',\n    title,\n    description: 'Cena samostatnej polievky 2,50 €',\n    price_eur: 2.50,\n    allergens: isAllergenLine(nextLine) ? extractAllergens(nextLine) : [],\n    raw_text: `${firstLine} ${nextLine || ''}`.trim(),\n  };\n}\nfunction parseDishes(dayLines) {\n  const dishes = [];\n  let current = null;\n  for (const line of dayLines) {\n    const dishStart = line.match(/^(\\d+)\\)\\s*(.+)$/);\n    if (dishStart) {\n      if (current) dishes.push(current);\n      current = { menu_code: dishStart[1], titleParts: [dishStart[2]], allergens: [], price_eur: null, rawParts: [line] };\n      continue;\n    }\n    if (!current) continue;\n    current.rawParts.push(line);\n    if (isPriceLine(line)) { current.price_eur = priceToNumber(line); continue; }\n    if (isAllergenLine(line)) { current.allergens = extractAllergens(line); continue; }\n    current.titleParts.push(line);\n  }\n  if (current) dishes.push(current);\n  return dishes.filter(d => d.price_eur !== null).map(dish => {\n    const title = cleanLine(dish.titleParts.join(' '));\n    let category = 'main';\n    if (/burger/i.test(title) || /šalát|salat/i.test(title)) category = 'special';\n    return {\n      menu_code: dish.menu_code,\n      category,\n      title,\n      description: '',\n      price_eur: dish.price_eur,\n      allergens: dish.allergens,\n      raw_text: cleanLine(dish.rawParts.join(' ')),\n    };\n  });\n}\n\nconst menuDate = sourceMeta.menuDate;\nconst wantedDay = getWantedDay(menuDate);\nconst runId = sourceMeta.runId;\nconst base = { sourceId: sourceMeta.sourceId, sourceName: sourceMeta.sourceName, sourceType: sourceMeta.sourceType, sourceUrl: sourceMeta.sourceUrl, parser: sourceMeta.parserName, menuDate, runId, run_id: runId, stage: 'zark_parse' };\nconst rawText = getPdfText($input.first());\n\nif (!rawText || rawText.length < 100) {\n  return [{ json: { ...base, ok: false, status: 'failed', errorCode: 'PDF_TEXT_EMPTY', errorMessage: 'Extract PDF Text node returned no readable ZARK text.', itemCount: 0, menuItems: [] } }];\n}\nif (!wantedDay) {\n  return [{ json: { ...base, ok: true, status: 'skipped', errorCode: 'WEEKEND_NO_MENU', errorMessage: `No ZARK daily menu expected for ${menuDate}.`, itemCount: 0, menuItems: [] } }];\n}\n\nconst lines = rawText\n  .split('\\n')\n  .map(cleanLine)\n  .filter(Boolean)\n  .filter(line => line !== '1')\n  .filter(line => line !== '5.3.31');\n\nconst dayLines = splitDayBlock(lines, wantedDay);\nif (!dayLines.length) {\n  return [{ json: { ...base, ok: false, status: 'failed', errorCode: 'DAY_BLOCK_NOT_FOUND', errorMessage: `Could not find day block for ${wantedDay}.`, wantedDay, itemCount: 0, menuItems: [], debugLines: [sourceMeta.pdfUrl, ...lines.slice(0, 120)] } }];\n}\n\nconst soup = parseSoup(dayLines[0], dayLines[1]);\nconst dishLines = soup ? dayLines.slice(2) : dayLines.slice(1);\nconst dishes = parseDishes(dishLines);\nconst parsedItems = [...(soup ? [soup] : []), ...dishes];\n\nconst menuItems = parsedItems.map(item => {\n  const uidBase = [sourceMeta.sourceId, menuDate, item.menu_code, item.title, item.price_eur].join('|');\n  return {\n    item_uid: `${sourceMeta.sourceId}-${menuDate}-${item.menu_code}-${hashString(uidBase)}`,\n    source_id: sourceMeta.sourceId,\n    source_name: sourceMeta.sourceName,\n    source_type: sourceMeta.sourceType,\n    source_url: sourceMeta.sourceUrl,\n    menu_date: menuDate,\n    menu_code: item.menu_code,\n    category: item.category || 'main',\n    title: item.title,\n    description: item.description || '',\n    price_eur: item.price_eur,\n    currency: 'EUR',\n    allergens: item.allergens || [],\n    raw_text: item.raw_text || '',\n    parsed_at: new Date().toISOString(),\n    run_id: runId,\n  };\n});\n\nreturn [{\n  json: {\n    ...base,\n    weekValidation: $('Code - ZARK Validate Week').first().json.weekValidation,\n    ok: menuItems.length > 0,\n    status: menuItems.length > 0 ? 'success' : 'failed',\n    errorCode: menuItems.length > 0 ? null : 'NO_ZARK_ITEMS_PARSED',\n    errorMessage: menuItems.length > 0 ? null : `Found ${wantedDay}, but parsed 0 items.`,\n    wantedDay,\n    itemCount: menuItems.length,\n    menuItems,\n    debugDayLines: [sourceMeta.pdfUrl, ...dayLines],\n  }\n}];\n"
+      },
+      "id": "62b028e5-be75-58ee-83d9-bf324ed1255c",
+      "name": "Result - ZARK",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1640,
+        420
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $input.first().json;\nconst init = $('Code - Plan').first().json;\nlet resolved = {};\ntry { resolved = $('Code - ZARK Resolve PDF URL').first().json; } catch {}\nconst error = input.error;\nconst message = typeof error === 'string' ? error : error?.message || input.message || 'ZARK processing failed';\nconst payload = {...init,...resolved,ok:false,status:'failed',stage:/ZARK_WEEK_/.test(message)?'zark_week_validation':'zark_fetch_validate_extract',errorMessage:message,errorCode:message.match(/ZARK_[A-Z_]+/)?.[0]||null,itemCount:0,menuItems:[],debugLines:[JSON.stringify({pdfUrl:resolved.pdfUrl || null,discoveryUrl:init.discoveryUrl,runId:init.runId,error:message})]};\nconsole.log(JSON.stringify({event:'zark_failed',...payload,menuItems:undefined}));\nreturn [{json:payload}];\n"
+      },
+      "id": "1b6c0968-a41e-5c2a-9d36-953006332271",
+      "name": "Result - ZARK Failure",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1640,
+        620
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.sourceUrl }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/126 Safari/537.36 n8n-menu-ingestion"
+            },
+            {
+              "name": "Accept",
+              "value": "text/html,application/pdf,image/*;q=0.9,*/*;q=0.8"
+            },
+            {
+              "name": "Accept-Language",
+              "value": "sk-SK,sk;q=0.9,cs;q=0.8,en;q=0.7"
+            },
+            {
+              "name": "Cache-Control",
+              "value": "no-cache"
+            }
+          ]
+        },
+        "options": {
+          "redirect": {
+            "redirect": {
+              "maxRedirects": 5
+            }
+          },
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "responseFormat": "file"
+            }
+          },
+          "timeout": "={{ Math.min(30000, Math.max(1000, Number($json.timeoutMs) || 15000)) }}"
+        }
+      },
+      "id": "55f77844-bb41-56b3-b3ed-ebace01d7563",
+      "name": "HTTP - Fetch for AI",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        200,
+        800
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Turns the fetched page (HTML, PDF or image) into a Claude Messages API request.\n// Structured output (json_schema) guarantees the reply parses into the dish list.\nconst meta = $('Code - Plan').first().json;\nconst item = $input.first();\nconst status = Number(item.json.statusCode || 200);\nif (status >= 400) throw new Error(`AI_FETCH_HTTP_STATUS: ${status}`);\nif (!item.binary?.data) throw new Error('AI_FETCH_EMPTY: stránka nevrátila žiadny obsah');\n\nconst headers = item.json.headers || {};\nconst contentType = String(headers['content-type'] || headers['Content-Type'] || item.binary.data.mimeType || '').split(';')[0].trim().toLowerCase();\nconst buffer = await this.helpers.getBinaryDataBuffer(0, 'data');\nconst MAX_BYTES = 20 * 1024 * 1024;\nif (buffer.length > MAX_BYTES) throw new Error(`AI_FETCH_TOO_LARGE: ${buffer.length} B`);\n\nconst MAX_TEXT_CHARS = 150000;\nlet content;\nlet inputKind;\nlet truncated = false;\nif (contentType === 'application/pdf' || buffer.subarray(0, 5).toString('ascii') === '%PDF-') {\n  inputKind = 'pdf';\n  content = [{ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: buffer.toString('base64') } }];\n} else if (/^image\\/(png|jpeg|gif|webp)$/.test(contentType)) {\n  inputKind = 'image';\n  content = [{ type: 'image', source: { type: 'base64', media_type: contentType, data: buffer.toString('base64') } }];\n} else {\n  inputKind = 'html';\n  const text = buffer.toString('utf8')\n    .replace(/<script[\\s\\S]*?<\\/script>/gi, ' ')\n    .replace(/<style[\\s\\S]*?<\\/style>/gi, ' ')\n    .replace(/<noscript[\\s\\S]*?<\\/noscript>/gi, ' ')\n    .replace(/<svg[\\s\\S]*?<\\/svg>/gi, ' ')\n    .replace(/<br\\s*\\/?\\s*>/gi, '\\n')\n    .replace(/<\\/\\s*(h\\d|p|li|div|article|section|span|a|strong|em|ul|ol|td|tr|table)>/gi, '\\n')\n    .replace(/<[^>]+>/g, ' ')\n    .replace(/&nbsp;|&#160;/g, ' ').replace(/&amp;/g, '&').replace(/&quot;/g, '\"').replace(/&#0?39;|&apos;/g, \"'\").replace(/&euro;/g, '€')\n    .replace(/&#(\\d+);/g, (_, n) => String.fromCharCode(Number(n)))\n    .split('\\n').map((l) => l.replace(/\\s+/g, ' ').trim()).filter(Boolean).join('\\n');\n  if (!text) throw new Error('AI_PAGE_NO_TEXT: stránka neobsahuje text (menu môže byť načítavané cez JavaScript alebo iba ako obrázok)');\n  truncated = text.length > MAX_TEXT_CHARS;\n  content = [{ type: 'text', text: `Text of the page ${meta.sourceUrl}:\\n\\n${text.slice(0, MAX_TEXT_CHARS)}` }];\n}\n\nconst weekday = ['nedeľa', 'pondelok', 'utorok', 'streda', 'štvrtok', 'piatok', 'sobota'][new Date(`${meta.menuDate}T12:00:00Z`).getUTCDay()];\nconst [y, m, d] = meta.menuDate.split('-');\nconst instructions = [\n  `Restaurant: ${meta.sourceName}. Target date: ${meta.menuDate} (${weekday} ${Number(d)}.${Number(m)}.${y}).`,\n  'From the material above, extract the lunch menu (denné / obedové menu) offered on exactly the target date.',\n  'Weekly menus list several days: take only the target day, plus weekly specials or all-week offers that are valid on that day.',\n  'Do not invent dishes. If the material is for a different week, or the target day is not listed, return status \"no_menu_for_date\".',\n  'If the restaurant is closed that day, return status \"closed\". If this is not a lunch menu at all, return \"not_a_menu_page\".',\n  'Keep dish names in the original Slovak. Use the menu\\'s own code (e.g. \"1\", \"A\", \"P\" for soup) in menu_code, or \"\" if none.',\n  'price_eur: the dish price in euros as a number; 0 if no price is shown. allergens: the allergen numbers as strings.',\n  'description: portion size or side notes if shown, otherwise \"\". note: one short sentence about what you found.',\n].join('\\n');\n\nconst schema = {\n  type: 'object',\n  additionalProperties: false,\n  required: ['status', 'note', 'dishes'],\n  properties: {\n    status: { type: 'string', enum: ['menu_found', 'closed', 'no_menu_for_date', 'not_a_menu_page'] },\n    note: { type: 'string' },\n    dishes: {\n      type: 'array',\n      items: {\n        type: 'object',\n        additionalProperties: false,\n        required: ['menu_code', 'category', 'title', 'description', 'price_eur', 'allergens'],\n        properties: {\n          menu_code: { type: 'string' },\n          category: { type: 'string', enum: ['soup', 'main', 'special', 'pizza', 'side', 'dessert', 'drink'] },\n          title: { type: 'string' },\n          description: { type: 'string' },\n          price_eur: { type: 'number' },\n          allergens: { type: 'array', items: { type: 'string' } },\n        },\n      },\n    },\n  },\n};\n\nconst cfg = meta.parserConfig || {};\nconst requestBody = {\n  model: cfg.model || 'claude-opus-5-5',\n  max_tokens: 16000,\n  output_config: { effort: cfg.effort || 'low', format: { type: 'json_schema', schema } },\n  // On a safety-classifier refusal, retry server-side on Anthropic's recommended model\n  fallbacks: 'default',\n  system: 'You extract restaurant lunch menus into structured data. Reply only with the requested JSON.',\n  messages: [{ role: 'user', content: [...content, { type: 'text', text: instructions }] }],\n};\n\nreturn [{ json: { ...meta, requestBody, inputKind, inputBytes: buffer.length, truncated } }];\n"
+      },
+      "id": "f0b3774a-10e9-5b8e-a044-373d0bcb113b",
+      "name": "Code - AI Build Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        800
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ ($env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com') + '/v1/messages' }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            },
+            {
+              "name": "anthropic-beta",
+              "value": "server-side-fallback-2026-07-01"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.requestBody) }}",
+        "options": {
+          "timeout": 180000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "805c5c7f-d060-5af2-ba35-facabc0d3491",
+      "name": "HTTP - Claude API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        680,
+        800
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "ObMenuAnthropic1",
+          "name": "Anthropic API (x-api-key)"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 5000,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Reads Claude's structured reply and maps the dishes to lunch_menu_items rows\nconst meta = $('Code - Plan').first().json;\nconst built = $('Code - AI Build Request').first().json;\nconst res = $input.first().json;\nconst body = res.body && typeof res.body === 'object' ? res.body : res;\nconst statusCode = Number(res.statusCode || 200);\n\nfunction hashString(s) {\n  let h = 2166136261;\n  for (const ch of String(s)) { h ^= ch.charCodeAt(0); h = Math.imul(h, 16777619); }\n  return (h >>> 0).toString(16);\n}\nconst clean = (v) => String(v ?? '').replace(/[\\u0000-\\u001F\\u007F]/g, ' ').replace(/\\s+/g, ' ').trim();\nconst base = {\n  sourceId: meta.sourceId, sourceName: meta.sourceName, sourceType: meta.sourceType, sourceUrl: meta.sourceUrl,\n  parser: meta.parserName, menuDate: meta.menuDate, runId: meta.runId, run_id: meta.runId, stage: 'ai_extract',\n  fetchedAt: new Date().toISOString(),\n  debugDayLines: [`input=${built.inputKind} bytes=${built.inputBytes}${built.truncated ? ' (text skrátený na 150k znakov)' : ''}`, `model=${body.model || built.requestBody.model}`, `usage=${JSON.stringify(body.usage || {})}`],\n};\nconst fail = (errorCode, errorMessage) => [{ json: { ...base, ok: false, status: 'failed', errorCode, errorMessage, itemCount: 0, menuItems: [] } }];\n\nif (statusCode >= 400) return fail('AI_API_ERROR', `Claude API HTTP ${statusCode}: ${body.error?.message || JSON.stringify(body).slice(0, 300)}`);\nif (body.stop_reason === 'refusal') return fail('AI_REFUSED', 'Model odmietol spracovať stránku.');\nif (body.stop_reason === 'max_tokens') return fail('AI_TRUNCATED', 'Odpoveď modelu bola useknutá (max_tokens).');\nconst text = (body.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('');\nlet data;\ntry { data = JSON.parse(text); } catch { return fail('AI_INVALID_JSON', `Neplatný JSON od modelu: ${text.slice(0, 200)}`); }\n\nconst items = (data.dishes || []).map((dish) => {\n  const title = clean(dish.title);\n  const price = Number(dish.price_eur) > 0 ? Math.round(Number(dish.price_eur) * 100) / 100 : null;\n  const menuCode = clean(dish.menu_code) || null;\n  if (title.length < 3) return null;\n  return {\n    source_id: meta.sourceId, source_name: meta.sourceName, source_type: meta.sourceType, source_url: meta.sourceUrl,\n    menu_date: meta.menuDate,\n    item_uid: `${meta.sourceId}-${meta.menuDate}-${hashString(`${meta.sourceId}|${meta.menuDate}|${menuCode || ''}|${title}|${price ?? ''}`)}`,\n    menu_code: menuCode,\n    category: dish.category || 'main',\n    title,\n    description: clean(dish.description),\n    price_eur: price,\n    currency: 'EUR',\n    allergens: (dish.allergens || []).map(clean).filter(Boolean),\n    raw_text: clean(`${menuCode || ''} ${title} ${dish.description || ''} ${price ?? ''} €`),\n    parsed_at: new Date().toISOString(),\n    run_id: meta.runId,\n  };\n}).filter(Boolean);\nconst unique = [...new Map(items.map((i) => [i.item_uid, i])).values()].slice(0, meta.maxItems || 100);\nbase.debugDayLines.push(`ai_status=${data.status}`, `note=${clean(data.note)}`);\n\nif (unique.length) return [{ json: { ...base, ok: true, status: 'success', errorCode: null, errorMessage: null, itemCount: unique.length, menuItems: unique } }];\nif (data.status === 'closed') return [{ json: { ...base, ok: true, status: 'skipped', errorCode: 'RESTAURANT_CLOSED', errorMessage: clean(data.note) || 'Reštaurácia má zatvorené.', itemCount: 0, menuItems: [] } }];\nreturn fail(data.status === 'not_a_menu_page' ? 'NOT_A_MENU_PAGE' : 'NO_MENU_FOR_DATE', clean(data.note) || `Pre ${meta.menuDate} sa menu nenašlo.`);\n"
+      },
+      "id": "61a3510a-8cb9-5f03-905d-a53fe1b77b9e",
+      "name": "Result - AI",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        920,
+        800
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Fetch / request-building errors on the AI branch become a failed source result\nconst meta = $('Code - Plan').first().json;\nconst row = $input.first().json;\nconst message = typeof row.error === 'string' ? row.error : row.error?.message || row.message || 'AI extrakcia zlyhala';\nreturn [{ json: { sourceId: meta.sourceId, sourceName: meta.sourceName, sourceType: meta.sourceType, sourceUrl: meta.sourceUrl, parser: meta.parserName, menuDate: meta.menuDate, runId: meta.runId, run_id: meta.runId, ok: false, status: 'failed', stage: 'ai_fetch', errorCode: (String(message).match(/^[A-Z_]+/) || ['AI_FETCH_FAILED'])[0], errorMessage: String(message).slice(0, 500), itemCount: 0, menuItems: [] } }];\n"
+      },
+      "id": "059823b9-8ce0-5dfd-ad62-7d8fc9f8be01",
+      "name": "Result - AI Failure",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        920,
+        1000
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## Parser reštaurácie (v4)\nSpracuje JEDNU reštauráciu (volajú ho workflowy „import“ a „test zdroja“, vždy pre jednu položku).\nVetva sa vyberá podľa `parser_name` z tabuľky `lunch_sources` (spravuje sa v admine).\n\n- **HTML**: woocommerce_category (BelaVery), amelia, sme_restauracie\n- **zark_pdf**: hľadanie PDF + kontrola týždňa (bez zmeny oproti v3)\n- **ai_extract**: HTML / PDF / obrázok → Claude (`claude-opus-5-5`, effort low, štruktúrovaný JSON). Credential „Anthropic API (x-api-key)“ = Header Auth, Name `x-api-key`. Model sa dá zmeniť v `parser_config.model`.\n\nKaždá vetva končí uzlom „Result - …“ s výsledkom v tvare, ktorý očakáva audit importu.",
+        "height": 380,
+        "width": 620
+      },
+      "id": "367454ec-352c-50b0-ada3-f647df73bf48",
+      "name": "Poznámky",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -760,
+        -380
+      ]
+    }
+  ],
+  "connections": {
+    "Start": {
+      "main": [
+        [
+          {
+            "node": "Code - Plan",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code - Plan": {
+      "main": [
+        [
+          {
+            "node": "Switch - Parser",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Switch - Parser": {
+      "main": [
+        [
+          {
+            "node": "Result - Bez sťahovania",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "HTTP - Fetch HTML",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "HTTP - ZARK Homepage",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "HTTP - Fetch for AI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP - Fetch HTML": {
+      "main": [
+        [
+          {
+            "node": "Result - Parse HTML",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP - ZARK Homepage": {
+      "main": [
+        [
+          {
+            "node": "Code - ZARK Resolve PDF URL",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Result - ZARK Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code - ZARK Resolve PDF URL": {
+      "main": [
+        [
+          {
+            "node": "HTTP - Fetch PDF Source",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Result - ZARK Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP - Fetch PDF Source": {
+      "main": [
+        [
+          {
+            "node": "Code - ZARK Validate PDF",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Result - ZARK Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code - ZARK Validate PDF": {
+      "main": [
+        [
+          {
+            "node": "Extract - PDF Text",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Result - ZARK Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract - PDF Text": {
+      "main": [
+        [
+          {
+            "node": "Code - ZARK Validate Week",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Result - ZARK Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code - ZARK Validate Week": {
+      "main": [
+        [
+          {
+            "node": "Result - ZARK",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Result - ZARK Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Result - ZARK": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Result - ZARK Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP - Fetch for AI": {
+      "main": [
+        [
+          {
+            "node": "Code - AI Build Request",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Result - AI Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code - AI Build Request": {
+      "main": [
+        [
+          {
+            "node": "HTTP - Claude API",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Result - AI Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP - Claude API": {
+      "main": [
+        [
+          {
+            "node": "Result - AI",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Result - AI Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "id": "ObMenuParserV4aa",
+  "tags": [],
+  "pinData": {}
+}

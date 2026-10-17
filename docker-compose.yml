@@ -15,6 +15,9 @@ services:
       - SMTP_HOST=${SMTP_HOST:-smtp-relay}
       - SMTP_PORT=${SMTP_PORT:-25}
       - SMTP_FROM=${SMTP_FROM:?SMTP_FROM is required}
+      # Optional: n8n "test zdroja" webhook for the admin's "Otestovať" button
+      - N8N_TEST_WEBHOOK_URL=${N8N_TEST_WEBHOOK_URL:-}
+      - N8N_TEST_WEBHOOK_TOKEN=${N8N_TEST_WEBHOOK_TOKEN:-}
       - TZ=Europe/Bratislava
       - NODE_ENV=production
       - PORT=3000

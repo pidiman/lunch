@@ -4,7 +4,8 @@ name: Docker image
 
 on:
   push:
-    branches: [main]
+    # feature/* branches get their own image tag (e.g. feature-restauracie-admin), never latest
+    branches: [main, 'feature/**']
     tags: ['v*']
   workflow_dispatch:
 
@@ -33,6 +34,7 @@ jobs:
           images: ghcr.io/${{ github.repository }}
           tags: |
             type=sha,prefix=sha-
+            type=ref,event=branch,enable=${{ github.ref != 'refs/heads/main' }}
             type=semver,pattern={{version}}
             type=raw,value=latest,enable={{is_default_branch}}
 

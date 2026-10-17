@@ -1,0 +1,810 @@
+{
+  "name": "Obedové menu – import (v4)",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "00548c11-c4f6-55dc-a8d7-6cc526fefb59",
+      "name": "Manual Trigger - Test",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -500,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "5 10 * * *"
+            },
+            {
+              "field": "cronExpression",
+              "expression": "15 11 * * *"
+            }
+          ]
+        }
+      },
+      "id": "0609070a-3f7d-55d1-ba17-d2f3801a4463",
+      "name": "Schedule - Daily 10:05 + 11:15",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -500,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT source_id, source_name, source_type, source_url, parser_name, parser_config, has_weekend_menu\nFROM public.lunch_sources\nWHERE enabled AND COALESCE(parser_name, 'manual') <> 'manual'\nORDER BY source_id;",
+        "options": {
+          "connectionTimeout": 15
+        }
+      },
+      "id": "4d3277b3-4248-5f65-b437-7646d8f71219",
+      "name": "Postgres - Load Restaurants",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -260,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "wrGJhvIhkazZLGw5",
+          "name": "Postgres rpi4-webserver-lunch"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "jsCode": "// Restaurants come from lunch_sources (managed in the admin), not from this workflow.\n// MENU_DATE_OVERRIDE (YYYY-MM-DD) is only for manual test runs of a past/future day.\nconst now = new Date();\nconst today = new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Bratislava', year: 'numeric', month: '2-digit', day: '2-digit' }).format(now);\nconst menuDate = /^\\d{4}-\\d{2}-\\d{2}$/.test(String($env.MENU_DATE_OVERRIDE || '')) ? $env.MENU_DATE_OVERRIDE : today;\nconst runId = `${menuDate}-${Math.random().toString(36).slice(2, 10)}`;\nconst timeoutMs = Number($env.MENU_HTTP_TIMEOUT_MS || 15000);\nconst maxItems = Number($env.MENU_MAX_ITEMS_PER_SOURCE || 100);\n\nreturn $input.all().filter((i) => i.json.source_id).map((i) => ({\n  json: {\n    ...i.json,\n    sourceId: i.json.source_id,\n    sourceName: i.json.source_name,\n    sourceType: i.json.source_type,\n    sourceUrl: i.json.source_url,\n    menu_date: menuDate,\n    menuDate,\n    run_id: runId,\n    runId,\n    timeoutMs,\n    maxItems,\n    startedAt: now.toISOString(),\n  },\n}));\n"
+      },
+      "id": "6e7617db-eb47-526a-84f8-bf7a0610dd7d",
+      "name": "Code - Init Run",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -20,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "ObMenuParserV4aa",
+          "mode": "list",
+          "cachedResultName": "Obedové menu – parser reštaurácie (v4)"
+        },
+        "mode": "each",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "id": "6165b20f-5efd-5305-93c6-9f5ddba1d24c",
+      "name": "Execute - Parser",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        220,
+        300
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const expected = $('Code - Init Run').all().map(i=>i.json);\nconst input = $input.all().map(i=>i.json);\nconst sources = [], parents = [];\nfor (const config of expected) {\n const matches = input.filter(p=>(p.sourceId||p.source_id)===config.sourceId);\n const p=matches[0]||{};\n const items=Array.isArray(p.menuItems)?p.menuItems:[];\n const good=matches.length===1 && p.ok!==false && !['failed','skipped'].includes(p.status) && items.length>0 && items.every(i=>i.source_id===config.sourceId && i.item_uid && i.menu_date===config.menuDate);\n // Any parser may report \"skipped\" (weekend without menu, restaurant closed, manual source)\n const skipped=matches.length===1 && items.length===0 && p.status==='skipped';\n const record={sourceId:config.sourceId,sourceName:config.sourceName,ok:good||skipped,status:skipped?'skipped':good?'success':'failed',skipped,skipReason:skipped?(p.errorMessage||'Menu sa v tento deň neočakáva'):null,stage:p.stage||'source_result',expectedItems:good?items.length:0,errorMessage:good||skipped?null:(matches.length!==1?`Expected one source result, got ${matches.length}`:p.errorMessage||'No valid menu items'),errorCode:skipped?(p.errorCode||null):p.errorCode||null,sourceUrl:p.sourceUrl||config.sourceUrl,weekValidation:p.weekValidation||null};\n sources.push(record);\n if(good) parents.push(p);\n}\nconst runId=expected[0]?.runId;\nif(!runId || expected.some(c=>c.runId!==runId)) throw new Error('AUDIT_INCONSISTENT_RUN_ID');\nreturn [{json:{run_id:runId,runId,startedAt:expected[0].startedAt,menuDate:expected[0].menuDate,sourceCount:expected.length,sources,parents,stage:'audit_start',itemCount:parents.reduce((n,p)=>n+p.menuItems.length,0)}}];\n"
+      },
+      "id": "a161f7ba-c25f-56ae-adc2-d7495dd2a617",
+      "name": "Code - Prepare Run Audit",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        460,
+        300
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO public.lunch_import_runs\n(run_id, started_at, status, source_count, item_count, error_count, meta)\nVALUES ($1::jsonb->>'run_id', ($1::jsonb->>'startedAt')::timestamptz, 'running',\n($1::jsonb->>'sourceCount')::integer, 0, 0,\njsonb_build_object('phase','writing','menuDate',$1::jsonb->>'menuDate','sources',$1::jsonb->'sources'))\nON CONFLICT (run_id) DO UPDATE SET\nstatus='running', item_count=0, error_count=0, source_count=EXCLUDED.source_count,\nmeta=EXCLUDED.meta, updated_at=NOW()\nRETURNING run_id, status;",
+        "options": {
+          "connectionTimeout": 15,
+          "queryBatching": "single",
+          "queryReplacement": "={{ [JSON.stringify($json)] }}"
+        }
+      },
+      "id": "95fe9b7d-091d-5ecb-adfd-ab7bd522fef4",
+      "name": "Postgres - Start Run Audit",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        700,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "wrGJhvIhkazZLGw5",
+          "name": "Postgres rpi4-webserver-lunch"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "function clean(value, fallback = '') {\n  if (value === null || value === undefined) return fallback;\n  return String(value)\n    .replace(/[\\u0000-\\u001F\\u007F]/g, ' ')\n    .replace(/\\s+/g, ' ')\n    .trim();\n}\n\nfunction normalizeCategory(value) {\n  const allowed = ['soup', 'main', 'pizza', 'special', 'side', 'dessert', 'drink', 'unknown'];\n  const category = clean(value, 'main').toLowerCase();\n  return allowed.includes(category) ? category : 'main';\n}\n\nconst parents = $('Code - Prepare Run Audit').first().json.parents;\nconst output = [];\n\nfor (const parent of parents) {\n  const items = Array.isArray(parent.menuItems) ? parent.menuItems : [];\n  for (const raw of items) {\n    const price = raw.price_eur === null || raw.price_eur === undefined || raw.price_eur === ''\n      ? null\n      : Number(raw.price_eur);\n\n    output.push({\n      json: {\n        item_uid: clean(raw.item_uid),\n        source_id: clean(raw.source_id),\n        source_name: clean(raw.source_name),\n        source_type: clean(raw.source_type),\n        source_url: clean(raw.source_url),\n        menu_date: clean(raw.menu_date),\n        menu_code: clean(raw.menu_code),\n        category: normalizeCategory(raw.category),\n        title: clean(raw.title),\n        description: clean(raw.description),\n        price_eur: Number.isFinite(price) ? price : null,\n        currency: clean(raw.currency, 'EUR') || 'EUR',\n        allergens: Array.isArray(raw.allergens) ? raw.allergens.map(v => clean(v)).filter(Boolean) : [],\n        raw_text: clean(raw.raw_text),\n        parsed_at: clean(raw.parsed_at, new Date().toISOString()),\n        run_id: clean(raw.run_id || parent.run_id || parent.runId, `manual-${Date.now()}`),\n        ingestion_status: 'ready_for_db',\n      }\n    });\n  }\n}\n\nreturn output.length ? output.map(i=>({json:{...i.json,itemCount:1}})) : [{json:{_auditOnly:true,itemCount:0}}];\n"
+      },
+      "id": "23b02b1c-0e13-5c3f-9ef3-b58e02c565ef",
+      "name": "Code - Expand Items",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        940,
+        300
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Exactly one payload per restaurant, regardless of its item count.\nconst input = $input.all().map(i=>i.json).filter(i=>!i._auditOnly);\nconst audit = $('Code - Prepare Run Audit').first().json;\nconst groups = new Map();\nfor (const item of input) {\n if (!item.source_id || item.run_id!==audit.run_id) throw new Error('RESTAURANT_GROUP_INVALID_SOURCE_OR_RUN');\n if (!groups.has(item.source_id)) groups.set(item.source_id,new Map());\n groups.get(item.source_id).set(item.item_uid,item);\n}\nconst output = [...groups].map(([source_id,items])=>({json:{source_id,source_name:[...items.values()][0].source_name,run_id:audit.run_id,itemCount:items.size,items:[...items.values()]}}));\nconsole.log(JSON.stringify({event:'restaurant_transactions_prepared',runId:audit.run_id,transactions:output.map(i=>({sourceId:i.json.source_id,items:i.json.itemCount}))}));\nreturn output.length?output:[{json:{_auditOnly:true,itemCount:0,run_id:audit.run_id}}];\n"
+      },
+      "id": "c4f4afcb-51a5-5b37-97d4-456906ca1de2",
+      "name": "Code - Group Restaurant Transactions",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1180,
+        300
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "item-count-positive",
+              "leftValue": "={{ Number($json.itemCount || 0) }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "b8f56192-0b9d-5699-be1c-e08113720c64",
+      "name": "IF - Parsed Items OK?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1420,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "id": "03380c86-6646-507d-8f81-c08b379620f2",
+      "name": "Loop - Restaurant Transactions",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        1660,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- One atomic statement = one restaurant. Restaurants are managed in the admin (lunch_sources),\n-- so this only writes menu items; an unknown source_id fails on the foreign key.\nWITH payload AS (SELECT $1::jsonb AS j),\nitem_payload AS (\n SELECT entry AS j FROM payload\n CROSS JOIN LATERAL jsonb_array_elements(payload.j->'items') AS rows(entry)\n),\n-- Dishes from an earlier run of the same day that are no longer on the menu get hidden\n-- (items added by hand in the admin have run_id 'admin-…' and stay).\nretired AS (\n UPDATE public.lunch_menu_items m SET is_available = FALSE, updated_at = NOW()\n WHERE m.source_id = (SELECT j->>'source_id' FROM payload)\n   AND m.menu_date IN (SELECT DISTINCT (j->>'menu_date')::date FROM item_payload)\n   AND COALESCE(m.run_id, '') NOT LIKE 'admin-%'\n   AND m.is_available\n   AND m.item_uid NOT IN (SELECT j->>'item_uid' FROM item_payload)\n RETURNING m.id\n)\nINSERT INTO public.lunch_menu_items\n(item_uid,source_id,source_name,source_type,source_url,menu_date,menu_code,category,title,description,price_eur,currency,allergens,raw_text,parsed_at,run_id,is_available,updated_at)\nSELECT j->>'item_uid',j->>'source_id',j->>'source_name',j->>'source_type',j->>'source_url',\n(j->>'menu_date')::date,j->>'menu_code',j->>'category',j->>'title',j->>'description',\n(j->>'price_eur')::numeric,j->>'currency',j->'allergens',j->>'raw_text',\n(j->>'parsed_at')::timestamptz,j->>'run_id',TRUE,NOW()\nFROM item_payload\nON CONFLICT(item_uid) DO UPDATE SET\nsource_id=EXCLUDED.source_id,source_name=EXCLUDED.source_name,source_type=EXCLUDED.source_type,\nsource_url=EXCLUDED.source_url,menu_date=EXCLUDED.menu_date,menu_code=EXCLUDED.menu_code,\ncategory=EXCLUDED.category,title=EXCLUDED.title,description=EXCLUDED.description,\nprice_eur=EXCLUDED.price_eur,currency=EXCLUDED.currency,allergens=EXCLUDED.allergens,\nraw_text=EXCLUDED.raw_text,parsed_at=EXCLUDED.parsed_at,run_id=EXCLUDED.run_id,is_available=TRUE,updated_at=NOW()\nRETURNING TRUE AS db_ok,item_uid,source_id,run_id;",
+        "options": {
+          "connectionTimeout": 15,
+          "queryBatching": "independently",
+          "queryReplacement": "={{ [JSON.stringify($json)] }}"
+        }
+      },
+      "id": "fcf99fef-3de8-5c25-9ca3-e99ce16f4fad",
+      "name": "Postgres - Upsert Restaurant Transaction",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1900,
+        400
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "wrGJhvIhkazZLGw5",
+          "name": "Postgres rpi4-webserver-lunch"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "alwaysOutputData": true,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const input=$input.all().map(i=>i.json);\nlet group={}; try {group=$('Loop - Restaurant Transactions').item.json;} catch {}\nconst failure=input.find(r=>r.error||r.errorMessage||r.errorDescription);\nif (failure) {\n const error=String(failure.error?.message||failure.error||failure.errorMessage||failure.errorDescription);\n const result={run_id:group.run_id||failure.run_id,source_id:group.source_id||failure.source_id||null,stage:'restaurant_transaction',error,errorMessage:error,db_ok:false,itemCount:0};\n console.log(JSON.stringify({event:'restaurant_transaction_failed',...result}));\n return [{json:result}];\n}\nconsole.log(JSON.stringify({event:'restaurant_transaction_completed',sourceId:group.source_id||input[0]?.source_id,runId:group.run_id||input[0]?.run_id,acknowledgedItems:input.filter(r=>r.db_ok===true).length}));\nreturn $input.all();\n"
+      },
+      "id": "310f8827-88fe-563d-b695-edeb68586de3",
+      "name": "Code - Restaurant Transaction Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2140,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const row=$input.first().json;\nconst audit=$('Code - Prepare Run Audit').first().json;\nlet group=row;\ntry { group=$('Loop - Restaurant Transactions').item.json; } catch {}\nconst error=String(row.error?.message||row.error||row.message||'Restaurant transaction failed');\nconst result={run_id:audit.run_id,source_id:group.source_id||row.source_id||null,stage:'restaurant_transaction',error,errorMessage:error,db_ok:false,itemCount:0};\nconsole.log(JSON.stringify({event:'restaurant_transaction_failed',...result}));\nreturn [{json:result}];\n"
+      },
+      "id": "0fea8b7c-6b0d-5e2d-896b-45027237ddec",
+      "name": "Code - Restaurant Transaction Failure",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2140,
+        600
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const audit=$('Code - Prepare Run Audit').first().json;\nconst planned=$('Code - Expand Items').all().map(i=>i.json).filter(i=>!i._auditOnly);\nconst raw=$input.all().map(i=>i.json).filter(i=>!i._auditOnly);\nconst acknowledgements=new Set(raw.filter(r=>r.db_ok===true&&r.run_id===audit.run_id).map(r=>r.item_uid));\nconst dbErrors=raw.filter(r=>r.error||r.errorMessage||r.errorDescription);\nconst sources=audit.sources.map(s=>{\n if(s.skipped===true && s.status==='skipped') return {...s,ok:true,expectedItems:0,writtenItems:0,missingWrites:0,errorMessage:null};\n const expected=new Set(planned.filter(i=>i.source_id===s.sourceId).map(i=>i.item_uid));\n const written=[...expected].filter(id=>acknowledgements.has(id)).length;\n const missing=expected.size-written;\n const transactionError=dbErrors.find(r=>r.source_id===s.sourceId);\n const reason=transactionError?String(transactionError.errorMessage||transactionError.error?.message||transactionError.error):null;\n return {...s,expectedItems:expected.size,writtenItems:written,missingWrites:missing,ok:s.ok&&missing===0&&written>0,status:s.ok&&missing===0&&written>0?'success':'failed',errorMessage:s.ok&&missing>0?(reason||`${missing} DB writes lack successful acknowledgement`):s.errorMessage};\n});\nconst processed=sources.reduce((n,s)=>n+s.writtenItems,0);\nconst skippedSources=sources.filter(s=>s.status==='skipped');\nconst failedSources=sources.filter(s=>!s.ok);\nconst unexpectedErrors=dbErrors.length>0;\nconst status=failedSources.length===0&&!unexpectedErrors?'success':processed>0?'partial_failure':'failed';\nconst errorCount=failedSources.length+(unexpectedErrors&&failedSources.length===0?1:0);\nconst meta={phase:'finished',menuDate:audit.menuDate,finishedAt:new Date().toISOString(),sources,skippedSourceCount:skippedSources.length,dbErrorCount:dbErrors.length,dbErrors:dbErrors.slice(0,10).map(r=>String(r.error?.message||r.error||r.errorMessage||r.errorDescription)),zarkWeekValidation:sources.find(s=>s.sourceId==='zark')?.weekValidation||null};\nconst errorMessage=failedSources.map(s=>`${s.sourceId}: ${s.errorMessage||'failed'}`).join('; ') || (unexpectedErrors?'Database reported an error':null);\nreturn [{json:{run_id:audit.run_id,runId:audit.run_id,status,ok:status==='success',stage:'run_audit',processed,itemCount:processed,sourceUrl:sources.find(s=>s.sourceId==='zark')?.sourceUrl||null,item_count:processed,error_count:errorCount,skipped_sources:skippedSources.map(s=>s.sourceId),source_count:audit.sourceCount,source_id:failedSources.map(s=>s.sourceId).join(',')||sources.map(s=>s.sourceId).join(','),source_counts:Object.fromEntries(sources.map(s=>[s.sourceId,s.writtenItems])),errorMessage,message:`Import ${status}: ${processed} written items; ${errorCount} failed sources`,debugLines:[JSON.stringify(meta)],meta}}];\n"
+      },
+      "id": "0ccbeb55-efc7-5087-ace3-84c021c4a741",
+      "name": "Code - DB Result Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1900,
+        100
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO public.lunch_import_runs\n(run_id,started_at,status,source_count,item_count,error_count,meta)\nVALUES ($1::jsonb->>'run_id',NOW(),(jsonb_populate_record(NULL::public.lunch_import_runs,$1::jsonb)).status,($1::jsonb->>'source_count')::integer,\n($1::jsonb->>'item_count')::integer,($1::jsonb->>'error_count')::integer,$1::jsonb->'meta')\nON CONFLICT(run_id) DO UPDATE SET\nstatus=EXCLUDED.status,source_count=EXCLUDED.source_count,item_count=EXCLUDED.item_count,\nerror_count=EXCLUDED.error_count,meta=EXCLUDED.meta,updated_at=NOW()\nRETURNING run_id,status,item_count,error_count,source_count;",
+        "options": {
+          "connectionTimeout": 15,
+          "queryBatching": "single",
+          "queryReplacement": "={{ [JSON.stringify($json)] }}"
+        }
+      },
+      "id": "9832926d-5004-581b-be4f-8126f9353f19",
+      "name": "Postgres - Finalize Run Audit",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        2140,
+        100
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "wrGJhvIhkazZLGw5",
+          "name": "Postgres rpi4-webserver-lunch"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const summary=$('Code - DB Result Summary').first().json;\nconst saved=$input.first().json;\nif(saved.run_id!==summary.run_id||saved.status!==summary.status) throw new Error('AUDIT_SAVE_CONFIRMATION_MISMATCH');\nreturn [{json:{...summary,auditPersisted:true}}];\n"
+      },
+      "id": "bea62f69-1fb9-59e5-8be8-61c9af71420d",
+      "name": "Code - Audit Saved",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2380,
+        100
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "db-ok",
+              "leftValue": "={{ $json.ok }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "e1681caa-eac9-5616-9f9b-bf1096876170",
+      "name": "IF - DB Write OK?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2620,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const j = $json;\nconst counts = Object.entries(j.source_counts || {}).map(([k,v]) => `${k}: ${v}`).join(', ');\nreturn [{\n  json: {\n    subject: `✅ Obedové menu import OK`,\n    message: `Import obedového menu prebehol OK.\\n\\nSpracované položky: ${j.processed}\\nZdroje: ${counts || j.source_id}\\nRun ID: ${j.run_id}`,\n    severity: 'info'\n  }\n}];\n"
+      },
+      "id": "2d6a741e-9462-53f7-8cf9-34c2d0bba78f",
+      "name": "Code - Success Notification Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2860,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{ json: { note: 'Nothing to notify. Success notification can be disabled by disconnecting this branch.' } }];\n"
+      },
+      "id": "56472c55-3265-5b05-84f9-8c3a54a56b36",
+      "name": "Code - End",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3100,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "function describeError(value) {\n const fields=[], seen=new Set();\n const scalarKeys=['message','description','errorMessage','errorDescription','detail','hint','code','sqlState','severity','schema','table','column','constraint','position','name'];\n function clean(v) { return String(v).replace(/(postgres(?:ql)?:\\/\\/[^:\\s/]+:)[^@\\s]+@/gi,'$1[REDACTED]@').replace(/(password\\s*[=:]\\s*)[^\\s;]+/gi,'$1[REDACTED]').slice(0,1800); }\n function visit(v,path,depth) {\n  if(v===null||v===undefined||depth>6)return;\n  if(typeof v==='string'||typeof v==='number'){if(String(v).trim())fields.push({field:path||'error',value:clean(v)});return;}\n  if(typeof v!=='object'||seen.has(v))return;\n  seen.add(v);\n  if(Array.isArray(v)){v.slice(0,5).forEach((e,i)=>visit(e,path+'['+i+']',depth+1));return;}\n  for(const key of scalarKeys)if(v[key]!==undefined)visit(v[key],path?path+'.'+key:key,depth+1);\n  for(const key of ['error','cause','errors','details'])if(v[key]!==undefined)visit(v[key],path?path+'.'+key:key,depth+1);\n }\n visit(value,'',0);\n const unique=[...new Map(fields.map(x=>[x.field+'='+x.value,x])).values()];\n return {message:unique.length?unique.map(x=>x.field+': '+x.value).join(' | ').slice(0,5000):'No readable error text; inspect input keys: '+Object.keys(value||{}).join(', '),fields:unique.slice(0,25)};\n}\nreturn $input.all().map(({json: item}) => {\n\n\nconst source = item.sourceId || item.source_id || item.sourceName || item.source_name || 'unknown-source';\nconst stage = item.stage || item.errorStage || item.status || item.errorCode || 'workflow';\nconst errorValue = item.errorMessage || item.error_message || item.error || item.message || item.errorDescription || item.description || item.debugMessage || 'No detailed error message from previous node';\nconst errorMessage = typeof errorValue === 'string' ? errorValue : describeError(errorValue).message;\nconst runId = item.run_id || item.runId || item.runID || item.executionId || item.importRunId || 'missing-run-id';\nconst itemCount = item.itemCount !== undefined ? item.itemCount : (Array.isArray(item.menuItems) ? item.menuItems.length : 'unknown');\nconst debug = item.debugDayLines || item.debugLines || item.debugPreview || item.availableBlocks || item.menuItems || '';\n\nreturn {\n  json: {\n    subject: `❌ Obedové menu import ERROR - ${source}`,\n    message: `Import obedového menu: ${item.status || \"failed\"}.\\n\\nSource: ${source}\\nStage: ${stage}\\nError: ${errorMessage}\\nRun ID: ${runId}\\nSource URL: ${item.pdfUrl || item.sourceUrl || item.source_url || \"unknown\"}\\nItem count: ${itemCount}\\n\\nDebug:\\n${typeof debug === 'string' ? debug.slice(0, 3000) : JSON.stringify(debug, null, 2).slice(0, 3000)}`,\n    severity: 'error',\n    source,\n    stage,\n    errorMessage,\n    runId,\n    itemCount,\n  }\n};\n});\n"
+      },
+      "id": "2b522c45-c42f-512f-946f-a0f5847c5f16",
+      "name": "Code - Error Notification Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2860,
+        600
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "function describeError(value) {\n const fields=[], seen=new Set();\n const scalarKeys=['message','description','errorMessage','errorDescription','detail','hint','code','sqlState','severity','schema','table','column','constraint','position','name'];\n function clean(v) { return String(v).replace(/(postgres(?:ql)?:\\/\\/[^:\\s/]+:)[^@\\s]+@/gi,'$1[REDACTED]@').replace(/(password\\s*[=:]\\s*)[^\\s;]+/gi,'$1[REDACTED]').slice(0,1800); }\n function visit(v,path,depth) {\n  if(v===null||v===undefined||depth>6)return;\n  if(typeof v==='string'||typeof v==='number'){if(String(v).trim())fields.push({field:path||'error',value:clean(v)});return;}\n  if(typeof v!=='object'||seen.has(v))return;\n  seen.add(v);\n  if(Array.isArray(v)){v.slice(0,5).forEach((e,i)=>visit(e,path+'['+i+']',depth+1));return;}\n  for(const key of scalarKeys)if(v[key]!==undefined)visit(v[key],path?path+'.'+key:key,depth+1);\n  for(const key of ['error','cause','errors','details'])if(v[key]!==undefined)visit(v[key],path?path+'.'+key:key,depth+1);\n }\n visit(value,'',0);\n const unique=[...new Map(fields.map(x=>[x.field+'='+x.value,x])).values()];\n return {message:unique.length?unique.map(x=>x.field+': '+x.value).join(' | ').slice(0,5000):'No readable error text; inspect input keys: '+Object.keys(value||{}).join(', '),fields:unique.slice(0,25)};\n}\nconst row=$input.first().json;\nconst ctx=$('Code - Prepare Run Audit').first().json;\nlet summary={};try{summary=$('Code - DB Result Summary').first().json;}catch{}\nconst diagnostic=describeError(row);\nconst failedNode=row.failureNode||row.error?.node?.name||row.node?.name||'unknown (inspect input connection)';\nconst stage=/^Postgres.*Audit/.test(failedNode)?'audit_storage':'audit_or_processing';\nreturn [{json:{sourceId:'run_audit',run_id:ctx.run_id,stage,status:'failed',errorMessage:diagnostic.message,itemCount:summary.item_count||0,debugLines:[JSON.stringify({failedNode,intendedStatus:summary.status||'running',auditPersisted:false,plannedItemCount:ctx.itemCount||0,inputKeys:Object.keys(row),errorDetails:diagnostic.fields})]}}];\n"
+      },
+      "id": "47fc8179-6d54-5ba2-895a-8035f68c7044",
+      "name": "Code - Audit Storage Failure",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2620,
+        600
+      ]
+    },
+    {
+      "parameters": {
+        "fromEmail": "={{ $env.SMTP_FROM || 'n8n@pidiman.sk' }}",
+        "toEmail": "={{ $env.ALERT_EMAIL_TO || 'jakub.demeter@gmail.com' }}",
+        "subject": "={{ $json.subject }}",
+        "emailFormat": "text",
+        "text": "={{ $json.message }}",
+        "options": {}
+      },
+      "id": "9b715674-d497-5343-938d-d376a3ebae17",
+      "name": "Email - Alert / Report",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        3100,
+        600
+      ],
+      "credentials": {
+        "smtp": {
+          "id": "Mrtoyj2tNfBpDF2G",
+          "name": "SMTP account 25"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "continueOnFail": true,
+      "webhookId": "d4099755-d4c6-5562-84c6-0e5bdd7a5626"
+    },
+    {
+      "parameters": {
+        "jsCode": "const row = $input.first().json;\nconst message = typeof row.error === 'string' ? row.error : row.error?.message || row.message || 'Parser workflow zlyhal';\nreturn [{ json: { ok: false, status: 'failed', itemCount: 0, items: [], errorCode: 'PARSER_WORKFLOW_ERROR', errorMessage: String(message).slice(0, 500) } }];\n"
+      },
+      "id": "5ad4f546-a56d-5d58-a67a-d75525d8ebd7",
+      "name": "Code - Parser Workflow Failure",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        460,
+        500
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## Import obedového menu (v4)\nReštaurácie sa načítajú z DB (`lunch_sources`, spravuje admin) – už nie sú v tomto workflowe.\nKaždá ide samostatne cez sub-workflow „parser reštaurácie (v4)“.\n\nAudit, transakcie po reštauráciách a e-maily sú rovnaké ako v3. Zmeny:\n- reštauráciu nezakladá ani nezapína n8n (lokalita/zapnutie ostávajú z adminu)\n- druhý beh o 11:15 doplní neskoro zverejnené menu; zmiznuté jedlá z rovnakého dňa sa skryjú\n- beží denne, víkend preskočí reštaurácie bez víkendového menu\n- `MENU_DATE_OVERRIDE=YYYY-MM-DD` v env n8n = test iného dňa",
+        "height": 380,
+        "width": 620
+      },
+      "id": "30b2f77c-a6fa-5ce7-a93a-6c4e8b4e70a2",
+      "name": "Poznámky",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -760,
+        -380
+      ]
+    }
+  ],
+  "connections": {
+    "Manual Trigger - Test": {
+      "main": [
+        [
+          {
+            "node": "Postgres - Load Restaurants",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Schedule - Daily 10:05 + 11:15": {
+      "main": [
+        [
+          {
+            "node": "Postgres - Load Restaurants",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Postgres - Load Restaurants": {
+      "main": [
+        [
+          {
+            "node": "Code - Init Run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code - Init Run": {
+      "main": [
+        [
+          {
+            "node": "Execute - Parser",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execute - Parser": {
+      "main": [
+        [
+          {
+            "node": "Code - Prepare Run Audit",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Code - Parser Workflow Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code - Parser Workflow Failure": {
+      "main": [
+        [
+          {
+            "node": "Code - Error Notification Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code - Prepare Run Audit": {
+      "main": [
+        [
+          {
+            "node": "Postgres - Start Run Audit",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Code - Error Notification Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Postgres - Start Run Audit": {
+      "main": [
+        [
+          {
+            "node": "Code - Expand Items",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Code - Audit Storage Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code - Expand Items": {
+      "main": [
+        [
+          {
+            "node": "Code - Group Restaurant Transactions",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Code - Audit Storage Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code - Group Restaurant Transactions": {
+      "main": [
+        [
+          {
+            "node": "IF - Parsed Items OK?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Code - Audit Storage Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF - Parsed Items OK?": {
+      "main": [
+        [
+          {
+            "node": "Loop - Restaurant Transactions",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Code - DB Result Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop - Restaurant Transactions": {
+      "main": [
+        [
+          {
+            "node": "Code - DB Result Summary",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Postgres - Upsert Restaurant Transaction",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Postgres - Upsert Restaurant Transaction": {
+      "main": [
+        [
+          {
+            "node": "Code - Restaurant Transaction Result",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Code - Restaurant Transaction Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code - Restaurant Transaction Result": {
+      "main": [
+        [
+          {
+            "node": "Loop - Restaurant Transactions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code - Restaurant Transaction Failure": {
+      "main": [
+        [
+          {
+            "node": "Loop - Restaurant Transactions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code - DB Result Summary": {
+      "main": [
+        [
+          {
+            "node": "Postgres - Finalize Run Audit",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Code - Audit Storage Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Postgres - Finalize Run Audit": {
+      "main": [
+        [
+          {
+            "node": "Code - Audit Saved",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Code - Audit Storage Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code - Audit Saved": {
+      "main": [
+        [
+          {
+            "node": "IF - DB Write OK?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Code - Audit Storage Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code - Audit Storage Failure": {
+      "main": [
+        [
+          {
+            "node": "Code - Error Notification Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF - DB Write OK?": {
+      "main": [
+        [
+          {
+            "node": "Code - Success Notification Payload",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Code - Error Notification Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code - Success Notification Payload": {
+      "main": [
+        [
+          {
+            "node": "Code - End",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code - Error Notification Payload": {
+      "main": [
+        [
+          {
+            "node": "Email - Alert / Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "id": "ObMenuImportV4aa",
+  "tags": [],
+  "pinData": {}
+}

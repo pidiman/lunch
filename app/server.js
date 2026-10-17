@@ -17,6 +17,19 @@ const SMTP_HOST = requireEnv('SMTP_HOST');
 const SMTP_PORT = Number(process.env.SMTP_PORT || 25);
 const SMTP_FROM = requireEnv('SMTP_FROM');
 const CATEGORIES = ['soup', 'main', 'special', 'pizza', 'side', 'dessert', 'drink', 'unknown'];
+// Optional: n8n "test zdroja" webhook behind the admin's "Otestovať" button
+const N8N_TEST_WEBHOOK_URL = process.env.N8N_TEST_WEBHOOK_URL || '';
+const N8N_TEST_WEBHOOK_TOKEN = process.env.N8N_TEST_WEBHOOK_TOKEN || '';
+
+// Parser registry shared with the n8n parser workflow (its Switch routes on these keys)
+const PARSERS = {
+  ai_extract: { label: 'AI extrakcia (odporúčané)', sourceType: 'html_daily_menu_page', hint: 'Ľubovoľný web reštaurácie, aj menu v PDF alebo na obrázku: Claude z neho vytiahne denné menu. Účtuje sa podľa použitia (rádovo centy za deň), over ho testom.' },
+  sme_restauracie: { label: 'SME Reštaurácie', sourceType: 'html_daily_menu_page', hint: 'URL „Denné menu“ na restauracie.sme.sk. Pozor: SME chráni stránky captchou a automatické čítanie často zablokuje.' },
+  woocommerce_category: { label: 'WooCommerce kategória', sourceType: 'html_woocommerce_category', hint: 'Kategória „denné menu“ v e-shope na WooCommerce (ako BelaVery). Jedlá v tvare „01 – Názov … 7,90 €“.' },
+  amelia: { label: 'Ostravárna Amélia', sourceType: 'html_daily_menu_page', hint: 'Iba pre web ameliarestaurant.sk.' },
+  zark_pdf: { label: 'ZARK týždenné PDF', sourceType: 'pdf_weekly_menu', hint: 'Iba pre ZARK. PDF sa hľadá na stránke z „discoveryUrl“ a kontroluje sa, či je z aktuálneho týždňa.' },
+  manual: { label: 'Ručne v admine', sourceType: 'manual', hint: 'Bez automatického importu, jedlá zadávaš v záložke Položky.' },
+};
 
 const pool = createPool({ max: 5 });
 
@@ -575,14 +588,20 @@ async function queryAdminData(menuDate) {
 
   const sources = await pool.query(`
     SELECT
-      source_id,
-      source_name,
-      source_type,
-      source_url,
-      source_location
-    FROM public.lunch_sources
-    ORDER BY source_location, source_name
-  `);
+      s.source_id,
+      s.source_name,
+      s.source_type,
+      s.source_url,
+      s.source_location,
+      s.enabled,
+      COALESCE(s.parser_name, 'manual') AS parser_name,
+      s.parser_config,
+      s.has_weekend_menu,
+      (SELECT COUNT(*) FROM public.lunch_menu_items m WHERE m.source_id = s.source_id AND m.menu_date = $1::date AND m.is_available)::int AS items_on_date,
+      (SELECT MAX(m.menu_date)::text FROM public.lunch_menu_items m WHERE m.source_id = s.source_id) AS last_menu_date
+    FROM public.lunch_sources s
+    ORDER BY s.enabled DESC, s.source_location, s.source_name
+  `, [menuDate]);
 
   const locations = await pool.query(`
     SELECT name, weight FROM public.lunch_locations ORDER BY weight, name
@@ -719,14 +738,97 @@ async function deleteItem(form) {
   await pool.query('DELETE FROM public.lunch_menu_items WHERE id = $1', [id]);
 }
 
-async function updateRestaurant(form) {
+// "Ostravárna Amélia" -> "ostravarna-amelia"
+function slugify(value) {
+  return clean(value).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
+}
+
+// Validated restaurant fields from an admin form (shared by create, update and test)
+async function restaurantFromForm(form) {
+  const name = clean(form.source_name);
+  if (!name) throw new Error('Názov reštaurácie je povinný.');
+  const parser = clean(form.parser_name, 'manual');
+  if (!PARSERS[parser]) throw new Error('Neznámy typ parsera.');
+  const url = clean(form.source_url);
+  if (parser !== 'manual' && !/^https?:\/\/\S+$/i.test(url)) throw new Error('Zadaj URL stránky s menu (začína http:// alebo https://).');
   const location = clean(form.source_location);
-  if (!location) throw new Error('Lokalita je povinná.');
+  const known = await pool.query(`SELECT 1 FROM public.lunch_locations WHERE name = $1`, [location]);
+  if (!known.rowCount) throw new Error('Vyber existujúcu lokalitu.');
+  let parserConfig = {};
+  const rawConfig = clean(form.parser_config);
+  if (rawConfig) {
+    try { parserConfig = JSON.parse(rawConfig); } catch { throw new Error('Pokročilé nastavenia musia byť platný JSON.'); }
+    if (!parserConfig || typeof parserConfig !== 'object' || Array.isArray(parserConfig)) throw new Error('Pokročilé nastavenia musia byť JSON objekt, napr. {}.');
+  }
+  return {
+    name,
+    parser,
+    sourceType: PARSERS[parser].sourceType,
+    url,
+    location,
+    parserConfig,
+    hasWeekendMenu: form.has_weekend_menu === 'on',
+    enabled: form.enabled === 'on',
+  };
+}
+
+async function createRestaurant(form) {
+  const r = await restaurantFromForm(form);
+  let id = slugify(form.source_id || r.name);
+  if (!id) throw new Error('Z názvu sa nedá vytvoriť ID, zadaj ho ručne (písmená a čísla).');
+  const taken = new Set((await pool.query(`SELECT source_id FROM public.lunch_sources WHERE source_id LIKE $1`, [`${id}%`])).rows.map((row) => row.source_id));
+  for (let n = 2; taken.has(id); n += 1) id = `${slugify(form.source_id || r.name).slice(0, 36)}-${n}`;
   await pool.query(`
+    INSERT INTO public.lunch_sources
+      (source_id, source_name, restaurant_name, source_type, source_url, source_location, parser_name, parser_config, has_weekend_menu, enabled, city)
+    VALUES ($1, $2, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, 'Bratislava')
+  `, [id, r.name, r.sourceType, r.url, r.location, r.parser, JSON.stringify(r.parserConfig), r.hasWeekendMenu, r.enabled]);
+  return id;
+}
+
+async function updateRestaurant(form) {
+  const r = await restaurantFromForm(form);
+  const updated = await pool.query(`
     UPDATE public.lunch_sources
-    SET source_location = $2, updated_at = NOW()
+    SET source_name = $2, restaurant_name = $2, source_type = $3, source_url = $4, source_location = $5,
+        parser_name = $6, parser_config = $7::jsonb, has_weekend_menu = $8, enabled = $9, updated_at = NOW()
     WHERE source_id = $1
-  `, [clean(form.source_id), location]);
+  `, [clean(form.source_id), r.name, r.sourceType, r.url, r.location, r.parser, JSON.stringify(r.parserConfig), r.hasWeekendMenu, r.enabled]);
+  if (!updated.rowCount) throw new Error('Reštaurácia neexistuje.');
+}
+
+// Runs the restaurant's parser through the n8n test webhook without writing anything to the DB
+async function testRestaurant(form) {
+  if (!N8N_TEST_WEBHOOK_URL) throw new Error('Test nie je nastavený: chýba premenná N8N_TEST_WEBHOOK_URL.');
+  const r = await restaurantFromForm(form);
+  if (r.parser === 'manual') throw new Error('Ručne zadávaná reštaurácia nemá čo testovať.');
+  const menuDate = parseIsoDate(form.menu_date) ? form.menu_date : todayIso();
+  let res;
+  try {
+    res = await fetch(N8N_TEST_WEBHOOK_URL, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...(N8N_TEST_WEBHOOK_TOKEN ? { 'x-menu-token': N8N_TEST_WEBHOOK_TOKEN } : {}) },
+      body: JSON.stringify({
+        source_id: clean(form.source_id) || slugify(r.name) || 'test',
+        source_name: r.name,
+        source_type: r.sourceType,
+        source_url: r.url,
+        parser_name: r.parser,
+        parser_config: r.parserConfig,
+        has_weekend_menu: r.hasWeekendMenu,
+        menu_date: menuDate,
+      }),
+      signal: AbortSignal.timeout(120000),
+    });
+  } catch (err) {
+    throw new Error(`n8n neodpovedá (${err.name === 'TimeoutError' ? 'vypršal čas' : err.message}).`);
+  }
+  const text = await res.text();
+  let data;
+  try { data = JSON.parse(text); } catch { throw new Error(`n8n vrátilo neplatnú odpoveď (HTTP ${res.status}).`); }
+  if (!res.ok && !data.errorMessage) throw new Error(`n8n vrátilo HTTP ${res.status}.`);
+  return { ...data, menuDate };
 }
 
 async function createLocation(form) {
@@ -1358,23 +1460,49 @@ function renderAdminPage({ items, sources, locations, users = [], currentUser, m
     return opts + (!names.includes(selected) ? `<option value="${escapeHtml(selected)}" selected>${escapeHtml(selected)}</option>` : '');
   };
 
-  const restaurantTableRows = sources.map((src) => `
-    <tr class="hover:bg-gray-50">
-      <td class="${tw.td}">
-        <div class="font-semibold">${escapeHtml(src.source_name)}</div>
-        <div class="text-xs text-gray-400 mt-0.5">${escapeHtml(src.source_id)}</div>
-      </td>
-      <td class="${tw.td} text-gray-500">${escapeHtml(src.source_type)}</td>
-      <td class="${tw.td}">
-        <form class="flex items-center gap-2 flex-wrap" method="post" action="/admin/restaurants/update">
-          <input type="hidden" name="_tab" value="restauracie">
-          <input type="hidden" name="source_id" value="${escapeHtml(src.source_id)}">
-          <select name="source_location" class="border border-gray-300 rounded-lg px-3 py-1.5 text-sm bg-white">${locationOptions(src.source_location)}</select>
-          <button type="submit" class="${tw.btnGreen}">Uložiť</button>
-        </form>
-      </td>
-    </tr>
-  `).join('');
+  const parserOptions = (selected) => Object.entries(PARSERS).map(([key, parser]) =>
+    `<option value="${key}" ${key === selected ? 'selected' : ''}>${escapeHtml(parser.label)}</option>`
+  ).join('');
+
+  // One form per restaurant; src = null renders the "add" form
+  const restaurantForm = (src) => {
+    const isNew = !src;
+    const r = src || { source_name: '', source_url: '', source_location: locations[0]?.name || '', parser_name: 'ai_extract', parser_config: {}, has_weekend_menu: false, enabled: true };
+    const config = r.parser_config && Object.keys(r.parser_config).length ? JSON.stringify(r.parser_config) : '';
+    const status = isNew ? ''
+      : !r.enabled ? 'Vypnutá: nezobrazuje sa a n8n ju preskakuje.'
+      : r.items_on_date ? `${r.items_on_date} ${plural(r.items_on_date, 'jedlo', 'jedlá', 'jedál')} na ${menuDate}`
+      : r.parser_name === 'manual' ? 'Jedlá sa zadávajú ručne v záložke Položky.'
+      : `Na ${menuDate} bez menu · ${r.last_menu_date ? `posledné menu ${r.last_menu_date}` : 'zatiaľ žiadne menu'}`;
+    return `
+      <form class="restaurant-form grid gap-3 p-5 ${!isNew && !r.enabled ? 'bg-gray-50' : ''}" method="post" action="/admin/restaurants/${isNew ? 'create' : 'update'}">
+        <input type="hidden" name="_tab" value="restauracie">
+        <input type="hidden" name="menu_date" value="${escapeHtml(menuDate)}">
+        ${isNew ? '' : `<input type="hidden" name="source_id" value="${escapeHtml(r.source_id)}">`}
+        <div class="grid gap-3 md:grid-cols-12">
+          <label class="block md:col-span-4"><span class="${tw.label}">Názov${isNew ? '' : ` <span class="normal-case font-normal text-gray-400">· ${escapeHtml(r.source_id)}</span>`}</span><input name="source_name" required value="${escapeHtml(r.source_name)}" class="${tw.input}"></label>
+          ${isNew ? `<label class="block md:col-span-2"><span class="${tw.label}">ID</span><input name="source_id" placeholder="automaticky" class="${tw.input}"></label>` : ''}
+          <label class="block ${isNew ? 'md:col-span-2' : 'md:col-span-3'}"><span class="${tw.label}">Lokalita</span><select name="source_location" class="${tw.input}">${locationOptions(r.source_location)}</select></label>
+          <label class="block ${isNew ? 'md:col-span-4' : 'md:col-span-5'}"><span class="${tw.label}">Typ parsera</span><select name="parser_name" class="parser-select ${tw.input}">${parserOptions(r.parser_name)}</select></label>
+          <label class="block md:col-span-12"><span class="${tw.label}">URL stránky s menu</span><input name="source_url" type="url" value="${escapeHtml(r.source_url)}" placeholder="https://…" class="${tw.input}"></label>
+        </div>
+        <p class="parser-hint m-0 text-xs text-gray-500">${escapeHtml(PARSERS[r.parser_name]?.hint || '')}</p>
+        <details class="text-sm">
+          <summary class="cursor-pointer font-semibold text-gray-500">Pokročilé nastavenia</summary>
+          <label class="block mt-2"><span class="${tw.label}">Konfigurácia parsera (JSON)</span><textarea name="parser_config" rows="2" placeholder="{}" class="${tw.input} font-mono">${escapeHtml(config)}</textarea></label>
+        </details>
+        <div class="flex flex-wrap items-center gap-x-5 gap-y-2">
+          <label class="inline-flex items-center gap-2 text-sm"><input type="checkbox" name="enabled" ${r.enabled ? 'checked' : ''}> Zapnutá</label>
+          <label class="inline-flex items-center gap-2 text-sm"><input type="checkbox" name="has_weekend_menu" ${r.has_weekend_menu ? 'checked' : ''}> Má menu aj cez víkend</label>
+          <span class="text-xs text-gray-400">${escapeHtml(status)}</span>
+          <div class="flex gap-2 md:ml-auto">
+            <button type="button" class="${tw.btnOutline} disabled:opacity-40 disabled:cursor-not-allowed" data-test-parser ${N8N_TEST_WEBHOOK_URL ? '' : 'disabled title="Test nie je nastavený (N8N_TEST_WEBHOOK_URL)"'}>Otestovať</button>
+            <button type="submit" class="${tw.btnGreen}">${isNew ? 'Pridať reštauráciu' : 'Uložiť'}</button>
+          </div>
+        </div>
+        <div class="test-result hidden rounded-xl border border-gray-200 bg-gray-50 p-3 text-sm" aria-live="polite"></div>
+      </form>`;
+  };
 
   const locationTableRows = locations.map((loc) => `
     <tr class="hover:bg-gray-50">
@@ -1580,25 +1708,19 @@ function renderAdminPage({ items, sources, locations, users = [], currentUser, m
 
     <!-- TAB: Reštaurácie -->
     <div id="tab-restauracie" class="tab-panel">
+      <div class="bg-white border border-gray-200 rounded-2xl shadow-sm overflow-hidden mb-4">
+        <div class="px-5 py-3 border-b border-gray-100">
+          <h2 class="text-base font-bold">Pridať reštauráciu</h2>
+          <p class="text-sm text-gray-400 mt-0.5">Typ parsera určuje, ako n8n číta menu. Pred uložením ho over tlačidlom Otestovať (testuje sa dátum ${escapeHtml(menuDate)} z filtra hore).</p>
+        </div>
+        ${restaurantForm(null)}
+      </div>
       <div class="bg-white border border-gray-200 rounded-2xl shadow-sm overflow-hidden">
         <div class="px-5 py-3 border-b border-gray-100">
-          <h2 class="text-base font-bold">Reštaurácie</h2>
-          <p class="text-sm text-gray-400 mt-0.5">Lokalita určuje skupinu, pod ktorou sa reštaurácia zobrazí na hlavnej stránke.</p>
+          <h2 class="text-base font-bold">Reštaurácie (${sources.length})</h2>
+          <p class="text-sm text-gray-400 mt-0.5">Lokalita určuje skupinu na hlavnej stránke. Vypnutá reštaurácia sa nezobrazuje a n8n ju preskakuje.</p>
         </div>
-        <div class="overflow-x-auto">
-          <table class="min-w-full divide-y divide-gray-100">
-            <thead class="bg-gray-50">
-              <tr>
-                <th class="${tw.th}">Reštaurácia</th>
-                <th class="${tw.th}">Typ</th>
-                <th class="${tw.th}">Lokalita</th>
-              </tr>
-            </thead>
-            <tbody class="divide-y divide-gray-100 bg-white">
-              ${restaurantTableRows}
-            </tbody>
-          </table>
-        </div>
+        <div class="divide-y divide-gray-100">${sources.map((src) => restaurantForm(src)).join('') || '<p class="px-5 py-6 text-sm text-gray-400">Žiadne reštaurácie.</p>'}</div>
       </div>
     </div>
 
@@ -1669,6 +1791,45 @@ function renderAdminPage({ items, sources, locations, users = [], currentUser, m
   </main>
   <script>
     function toggleRow(id) { document.getElementById(id).classList.toggle('hidden'); }
+
+    // Restaurants: parser hint follows the select; "Otestovať" runs the parser via n8n without saving
+    const PARSER_HINTS = ${JSON.stringify(Object.fromEntries(Object.entries(PARSERS).map(([key, parser]) => [key, parser.hint])))};
+    document.querySelectorAll('.parser-select').forEach((select) => select.addEventListener('change', () => {
+      select.closest('form').querySelector('.parser-hint').textContent = PARSER_HINTS[select.value] || '';
+    }));
+    document.querySelectorAll('[data-test-parser]').forEach((button) => button.addEventListener('click', async () => {
+      const form = button.closest('form');
+      const out = form.querySelector('.test-result');
+      const line = (text, cls) => { const p = document.createElement('p'); p.className = 'm-0 ' + (cls || ''); p.textContent = text; return p; };
+      out.classList.remove('hidden');
+      out.replaceChildren(line('Testujem parser… (AI extrakcia môže trvať aj minútu)', 'text-gray-500'));
+      button.disabled = true;
+      try {
+        const res = await fetch('/admin/restaurants/test', { method: 'POST', body: new URLSearchParams(new FormData(form)), headers: { accept: 'application/json' } });
+        const data = await res.json();
+        const items = Array.isArray(data.items) ? data.items : [];
+        if (items.length) {
+          const noun = items.length === 1 ? 'jedlo' : items.length <= 4 ? 'jedlá' : 'jedál';
+          out.replaceChildren(line('✓ Našiel som ' + items.length + ' ' + noun + ' na ' + data.menuDate + ':', 'font-bold text-green-700'));
+          const list = document.createElement('ul');
+          list.className = 'm-0 mt-2 pl-5 list-disc grid gap-0.5';
+          items.forEach((item) => {
+            const li = document.createElement('li');
+            const price = item.price_eur != null && item.price_eur !== '' ? ' · ' + Number(item.price_eur).toFixed(2).replace('.', ',') + ' €' : '';
+            li.textContent = (item.menu_code ? item.menu_code + ' – ' : '') + item.title + price + ' (' + (item.category || 'main') + ')';
+            list.append(li);
+          });
+          out.append(list);
+        } else {
+          const skipped = data.status === 'skipped';
+          out.replaceChildren(line((skipped ? 'Preskočené: ' : '✗ Nenašiel som žiadne jedlá. ') + (data.errorMessage || ''), skipped ? 'font-bold text-gray-600' : 'font-bold text-red-700'));
+        }
+      } catch (err) {
+        out.replaceChildren(line('✗ Test zlyhal: ' + err.message, 'font-bold text-red-700'));
+      } finally {
+        button.disabled = false;
+      }
+    }));
     const TABS = ${JSON.stringify(tabs)};
     function activateTab(name) {
       if (!TABS.includes(name)) name = TABS[0];
@@ -1776,6 +1937,20 @@ async function adminPost(req, res, url) {
   const form = await readForm(req);
   const menuDate = clean(form.menu_date, todayIso());
   const tab = clean(form._tab, 'polozky');
+
+  if (url.pathname === '/admin/restaurants/test') {
+    let status = 200;
+    let payload;
+    try {
+      payload = await testRestaurant(form);
+    } catch (err) {
+      status = 400;
+      payload = { ok: false, errorMessage: err.message };
+    }
+    res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+    return res.end(JSON.stringify(payload));
+  }
+
   try {
     if (url.pathname === '/admin/users/approve' || url.pathname === '/admin/users/delete') {
       if (url.pathname === '/admin/users/approve') await approveUser(form);
@@ -1784,6 +1959,7 @@ async function adminPost(req, res, url) {
     else if (url.pathname === '/admin/items/create') await createItem(form);
     else if (url.pathname === '/admin/items/update') await updateItem(form);
     else if (url.pathname === '/admin/items/delete') await deleteItem(form);
+    else if (url.pathname === '/admin/restaurants/create') await createRestaurant(form);
     else if (url.pathname === '/admin/restaurants/update') await updateRestaurant(form);
     else if (url.pathname === '/admin/locations/create') await createLocation(form);
     else if (url.pathname === '/admin/locations/update') await updateLocation(form);

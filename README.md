@@ -93,7 +93,7 @@ Admin sekcia (`/admin`) používa účty s e-mailom a heslom (bez `ADMIN_TOKEN`)
 - `/admin` zobrazuje iba prihlásenie. Registrácia je na hlavnej stránke cez tlačidlo „Prihlásiť sa" → tab „Registrácia".
 - Prvý zaregistrovaný používateľ automaticky získa rolu **admin**.
 - Ďalší registrovaní používatelia dostanú rolu **user** a musia počkať na schválenie adminom (tab „Používatelia").
-- Rola **user** môže meniť iba váhu (poradie) lokalít. Všetko ostatné je len pre admina.
+- Rola **user** nemá prístup do `/admin`; na hlavnej stránke si nastaví obľúbené reštaurácie, poradie lokalít a predvolenú lokalitu („Môj výber“).
 - Session platí 30 dní, odhlásenie je cez „Odhlásiť".
 
 ### Zabudnuté heslo
@@ -109,6 +109,19 @@ SMTP_FROM=obedove-menu@tvoja-domena.sk
 ```
 
 Kontajner `obedove-menu` musí mať sieťový prístup k `smtp-relay` — buď pripoj `smtp-relay` do siete `lunch-internal`, alebo nastav `SMTP_HOST` na IP hosta (ak má relay publikovaný port 25).
+
+## Reštaurácie a import (n8n)
+
+Reštaurácie sa pridávajú a upravujú v admine (záložka **Reštaurácie**): názov, lokalita, URL, typ parsera, zapnutie, víkendové menu. n8n ich načíta z DB a podľa typu parsera stiahne menu. Workflowy a návod na ich nasadenie sú v [n8n/](n8n/README.md).
+
+Tlačidlo **Otestovať** spustí parser cez n8n webhook a ukáže nájdené jedlá bez zápisu do DB. Potrebuje v `.env`:
+
+```env
+N8N_TEST_WEBHOOK_URL=http://IP_N8N:5678/webhook/obedove-menu-test-zdroja
+N8N_TEST_WEBHOOK_TOKEN=tajný reťazec (rovnaký ako v n8n credentials „Obedové menu test token“)
+```
+
+Bez týchto premenných admin funguje, iba tlačidlo Otestovať je neaktívne.
 
 ## Healthcheck
 
