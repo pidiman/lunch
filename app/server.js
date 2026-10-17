@@ -84,6 +84,23 @@ function todayIso() {
   return `${p.find((x) => x.type === 'year').value}-${p.find((x) => x.type === 'month').value}-${p.find((x) => x.type === 'day').value}`;
 }
 
+// Calendar dates (YYYY-MM-DD) are handled as UTC midnight so day arithmetic ignores DST
+function parseIsoDate(value) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(value || ''))) return null;
+  const d = new Date(`${value}T00:00:00Z`);
+  return Number.isNaN(d.getTime()) || d.toISOString().slice(0, 10) !== value ? null : d;
+}
+
+function shiftIsoDate(value, days) {
+  const d = parseIsoDate(value);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+function daysBetween(fromIso, toIso) {
+  return Math.round((parseIsoDate(toIso) - parseIsoDate(fromIso)) / 86400000);
+}
+
 function formatTime(value) {
   if (!value) return '—';
   const d = new Date(value);
@@ -385,7 +402,7 @@ async function readForm(req) {
 
 // userId is null for anonymous visitors: personal joins then match nothing and the
 // global order applies. Logged-in users get their own location order and favorites first.
-async function queryTodayMenu(userId = null) {
+async function queryMenu(menuDate, userId = null) {
   const menu = await pool.query(`
       SELECT
         m.source_id,
@@ -402,11 +419,13 @@ async function queryTodayMenu(userId = null) {
         m.allergens,
         m.parsed_at,
         (fav.source_id IS NOT NULL) AS is_favorite
-      FROM public.v_lunch_menu_today m
+      FROM public.lunch_menu_items m
       LEFT JOIN public.lunch_sources s ON s.source_id = m.source_id
       LEFT JOIN public.lunch_locations loc ON loc.name = s.source_location
       LEFT JOIN public.lunch_user_location_weights ulw ON ulw.location_name = s.source_location AND ulw.user_id = $1
       LEFT JOIN public.lunch_user_favorites fav ON fav.source_id = m.source_id AND fav.user_id = $1
+      WHERE m.menu_date = $2::date
+        AND m.is_available = TRUE
       ORDER BY
         COALESCE(ulw.weight, loc.weight, 999),
         s.source_location,
@@ -424,14 +443,14 @@ async function queryTodayMenu(userId = null) {
         END,
         m.menu_code NULLS LAST,
         m.title
-  `, [userId]);
+  `, [userId, menuDate]);
 
   const meta = await pool.query(`
     SELECT MAX(created_at) AS last_updated_at
     FROM public.lunch_menu_items
-    WHERE menu_date = CURRENT_DATE
+    WHERE menu_date = $1::date
       AND is_available = TRUE
-  `);
+  `, [menuDate]);
 
   return { items: menu.rows, lastUpdatedAt: meta.rows[0]?.last_updated_at || null };
 }
@@ -745,6 +764,14 @@ function formatHeroDate(value = new Date()) {
   return `${weekday.charAt(0).toUpperCase()}${weekday.slice(1)} · ${date}`;
 }
 
+// Compact variant for narrow screens, e.g. "Pi · 16. 10."
+function formatShortDate(value) {
+  const opts = { timeZone: 'Europe/Bratislava' };
+  const weekday = new Intl.DateTimeFormat('sk-SK', { ...opts, weekday: 'short' }).format(value);
+  const date = new Intl.DateTimeFormat('sk-SK', { ...opts, day: 'numeric', month: 'numeric' }).format(value);
+  return `${weekday.charAt(0).toUpperCase()}${weekday.slice(1)} · ${date}`;
+}
+
 function cheapestMainPrice(items) {
   const prices = (category) => items
     .filter((item) => !category || category.includes(item.category))
@@ -783,8 +810,13 @@ const STAR_SVG = '<svg width="22" height="22" viewBox="0 0 24 24" stroke="curren
 
 // auth: { pane, error, notice } opens the login modal on load (after a failed login, registration, …)
 // user / userLocations / flash are only set for logged-in visitors
-function renderPublicPage(items, { error = null, lastUpdatedAt = null, user = null, userLocations = [], auth = null, flash = null } = {}) {
-  const today = formatHeroDate(new Date());
+function renderPublicPage(items, { menuDate = todayIso(), error = null, lastUpdatedAt = null, user = null, userLocations = [], auth = null, flash = null } = {}) {
+  const todayDate = todayIso();
+  const dayOffset = daysBetween(todayDate, menuDate);
+  const dateHref = (iso) => (iso === todayDate ? '/' : `/?date=${iso}`);
+  const heroDate = formatHeroDate(parseIsoDate(menuDate));
+  const heading = { 0: 'Čo je dnes<br>na obed?', 1: 'Čo bude zajtra<br>na obed?', '-1': 'Čo bolo včera<br>na obed?' }[dayOffset]
+    || (dayOffset > 0 ? 'Čo bude<br>na obed?' : 'Čo bolo<br>na obed?');
   const updatedAt = formatTime(lastUpdatedAt);
   const updatedLabel = updatedAt === '—' ? 'Zatiaľ bez aktualizácie' : `Aktualizované o ${updatedAt}`;
   const grouped = groupByLocationAndSource(items);
@@ -851,6 +883,7 @@ function renderPublicPage(items, { error = null, lastUpdatedAt = null, user = nu
   const inputClass = 'mt-1 w-full border border-line-strong rounded-xl px-4 py-3 text-base bg-ground text-ink focus:outline-none focus:ring-2 focus:ring-accent';
   const labelClass = 'block text-xs font-bold text-muted uppercase tracking-wide';
   const paneBtnClass = 'auth-pane-btn h-10 px-4 rounded-full text-sm font-semibold border cursor-pointer bg-surface text-muted border-line-strong aria-pressed:bg-ink aria-pressed:text-ground aria-pressed:border-ink';
+  const dateNavBtnClass = 'grid place-items-center w-11 h-11 rounded-full border border-line-strong bg-surface text-ink no-underline hover:border-ink';
   const headerBtnClass = 'inline-flex items-center gap-2 h-11 px-3.5 sm:px-4.5 rounded-xl text-[15px] font-semibold cursor-pointer no-underline';
   const closeButton = (id) => `
       <button id="${id}" type="button" aria-label="Zavrieť" class="absolute top-4 right-4 grid place-items-center w-10 h-10 rounded-full bg-ground text-muted hover:text-ink cursor-pointer border-0">
@@ -905,6 +938,7 @@ function renderPublicPage(items, { error = null, lastUpdatedAt = null, user = nu
       <p class="m-0 mt-1 mb-5 text-sm text-muted break-all">${escapeHtml(user.email)}</p>
 
       <form method="post" action="/me/preferences" class="grid gap-5">
+        <input type="hidden" name="date" value="${escapeHtml(menuDate)}">
         <label class="block"><span class="${labelClass}">Predvolená lokalita</span>
           <select name="default_location" class="${inputClass}">
             <option value="">Všetky lokality</option>
@@ -986,8 +1020,20 @@ function renderPublicPage(items, { error = null, lastUpdatedAt = null, user = nu
 
     <section class="flex flex-wrap items-end justify-between gap-8 pt-6 sm:pt-10 pb-8">
       <div class="flex-[1_1_520px] min-w-0">
-        <p class="m-0 mb-3.5 text-[15px] font-semibold text-muted">${escapeHtml(today)}</p>
-        <h1 class="m-0 font-display font-extrabold text-[clamp(44px,7vw,88px)] leading-[0.95] tracking-[-0.035em]">Čo je dnes<br>na obed?</h1>
+        <nav aria-label="Výber dňa" class="flex flex-wrap items-center gap-1.5 mb-3.5">
+          <a href="${dateHref(shiftIsoDate(menuDate, -1))}" aria-label="Predchádzajúci deň" class="${dateNavBtnClass}"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg></a>
+          <!-- Transparent native date input over the label: tapping opens the OS date picker -->
+          <div class="relative rounded-full focus-within:ring-2 focus-within:ring-accent">
+            <span class="inline-flex items-center gap-2 h-11 px-4 rounded-full border border-line-strong bg-surface text-[15px] font-semibold whitespace-nowrap">
+              <span class="hidden sm:inline">${escapeHtml(heroDate)}</span><span class="sm:hidden">${escapeHtml(formatShortDate(parseIsoDate(menuDate)))}</span>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true" class="text-muted"><rect x="3" y="5" width="18" height="16" rx="3"/><path d="M3 10h18M8 3v4M16 3v4"/></svg>
+            </span>
+            <input id="date-input" type="date" value="${escapeHtml(menuDate)}" aria-label="Vybrať dátum" class="absolute inset-0 w-full h-full opacity-0 cursor-pointer">
+          </div>
+          <a href="${dateHref(shiftIsoDate(menuDate, 1))}" aria-label="Nasledujúci deň" class="${dateNavBtnClass}"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg></a>
+          ${dayOffset !== 0 ? '<a href="/" class="inline-flex items-center h-11 px-4 rounded-full bg-ink text-ground text-[15px] font-semibold no-underline hover:opacity-90">Dnes</a>' : ''}
+        </nav>
+        <h1 class="m-0 font-display font-extrabold text-[clamp(44px,7vw,88px)] leading-[0.95] tracking-[-0.035em]">${heading}</h1>
       </div>
       <div class="flex-[0_1_400px] grid grid-cols-3 gap-2.5">
         ${statTile(String(items.length), plural(items.length, 'jedlo', 'jedlá', 'jedál'))}
@@ -1003,7 +1049,7 @@ function renderPublicPage(items, { error = null, lastUpdatedAt = null, user = nu
 
     <main>
       ${error ? notice('Menu sa nepodarilo načítať', error) : ''}
-      ${!error && items.length === 0 ? notice('Zatiaľ tu nie je menu', 'V databáze nie sú položky pre dnešný deň.') : ''}
+      ${!error && items.length === 0 ? notice('Zatiaľ tu nie je menu', dayOffset === 0 ? 'V databáze nie sú položky pre dnešný deň.' : 'Pre tento deň nie sú v databáze žiadne položky.') : ''}
       ${!error ? content : ''}
     </main>
 
@@ -1063,8 +1109,17 @@ ${loginModal}${prefsModal}
     }
     document.querySelectorAll('.auth-pane-btn').forEach((btn) => btn.addEventListener('click', () => setPane(btn.dataset.pane)));
 
-    // Drop one-off ?auth=… / ?saved=… params so a reload doesn't show the message again
-    if (location.search) history.replaceState(null, '', location.pathname);
+    // Drop one-off ?auth=… / ?saved=… params so a reload doesn't show the message again; keep ?date
+    const params = new URLSearchParams(location.search);
+    ['auth', 'auth_error', 'auth_notice', 'saved', 'error'].forEach((name) => params.delete(name));
+    history.replaceState(null, '', location.pathname + (params.size ? '?' + params : ''));
+
+    const dateInput = document.getElementById('date-input');
+    // Desktop browsers only open the picker from the icon; open it on any click
+    dateInput.addEventListener('click', () => { try { dateInput.showPicker(); } catch {} });
+    dateInput.addEventListener('change', () => {
+      if (dateInput.value) location.href = dateInput.value === ${JSON.stringify(todayDate)} ? '/' : '/?date=' + dateInput.value;
+    });
 
     // Favorites: toggle in place via fetch; fall back to a normal form post
     document.querySelectorAll('.fav-form').forEach((form) => {
@@ -1636,7 +1691,8 @@ async function mePost(req, res, url) {
     }
     if (url.pathname === '/me/preferences') {
       await savePreferences(user.id, params);
-      return redirect(res, '/?saved=1');
+      const date = parseIsoDate(params.get('date')) && params.get('date') !== todayIso() ? `&date=${params.get('date')}` : '';
+      return redirect(res, `/?saved=1${date}`);
     }
     return sendHtml(res, 404, '<h1>404</h1>');
   } catch (err) {
@@ -1681,9 +1737,11 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'GET' && url.pathname === '/') {
       const user = await getSessionUser(req);
-      const { items, lastUpdatedAt } = await queryTodayMenu(user?.id ?? null);
       const param = (name) => url.searchParams.get(name) || '';
+      const menuDate = parseIsoDate(param('date')) ? param('date') : todayIso();
+      const { items, lastUpdatedAt } = await queryMenu(menuDate, user?.id ?? null);
       return sendHtml(res, 200, renderPublicPage(items, {
+        menuDate,
         lastUpdatedAt,
         user,
         userLocations: user ? await queryUserLocations(user.id) : [],
