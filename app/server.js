@@ -31,6 +31,8 @@ function readStaticAsset(fileName) {
 
 const faviconSvg = readStaticAsset('favicon.svg');
 const tailwindCss = readStaticAsset('tailwind.css');
+// Content hash in the stylesheet URL: a new build gets a new URL, so the long cache is safe
+const TAILWIND_URL = `/tailwind.css?v=${crypto.createHash('sha1').update(tailwindCss).digest('hex').slice(0, 10)}`;
 
 function escapeHtml(value) {
   return String(value ?? '')
@@ -982,7 +984,7 @@ function renderPublicPage(items, { menuDate = todayIso(), error = null, lastUpda
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,700;12..96,800&family=Figtree:wght@400;500;600;700&display=swap">
-  <link rel="stylesheet" href="/tailwind.css">
+  <link rel="stylesheet" href="${TAILWIND_URL}">
   <script>
     (function () {
       let saved = null;
@@ -1202,7 +1204,7 @@ function renderResetPage({ error = '', notice = '' } = {}) {
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Obnovenie hesla · ${escapeHtml(SITE_TITLE)}</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/tailwind.css">
+  <link rel="stylesheet" href="${TAILWIND_URL}">
 </head>
 <body class="min-h-screen grid place-items-center bg-gray-100 text-gray-900 antialiased px-3 py-8">
   <main class="w-full max-w-md">
@@ -1367,7 +1369,7 @@ function renderAdminPage({ items, sources, locations, users = [], currentUser, m
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Admin · ${escapeHtml(SITE_TITLE)}</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/tailwind.css">
+  <link rel="stylesheet" href="${TAILWIND_URL}">
   <style>.tab-panel{display:none}.tab-panel.active{display:block}</style>
 </head>
 <body class="bg-gray-100 text-gray-900 min-h-screen antialiased">
@@ -1720,7 +1722,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'GET' && url.pathname === '/tailwind.css') {
-      res.writeHead(200, { 'content-type': 'text/css; charset=utf-8', 'cache-control': 'public, max-age=3600' });
+      res.writeHead(200, { 'content-type': 'text/css; charset=utf-8', 'cache-control': 'public, max-age=31536000, immutable' });
       res.end(tailwindCss);
       return;
     }
